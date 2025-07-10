@@ -2,11 +2,13 @@ import { useState, useEffect } from "react";
 import { MetricCard } from "@/components/MetricCard";
 import { AlertCard } from "@/components/AlertCard";
 import { AIAgent } from "@/components/AIAgent";
+import { TopicLineage } from "@/components/TopicLineage";
 import { showNotification } from "@/components/NotificationToast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Server, Activity, Zap, AlertTriangle } from "lucide-react";
+import { Server, Activity, Zap, AlertTriangle, ExternalLink } from "lucide-react";
 
 // Mock data types
 interface KafkaMetric {
@@ -212,6 +214,11 @@ const Index = () => {
     }
   };
 
+  const handleControlCenter = () => {
+    // In a real app, this would open Kafka Control Center
+    window.open('http://localhost:9021', '_blank');
+  };
+
   return (
     <div className="min-h-screen bg-background p-6">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -234,15 +241,25 @@ const Index = () => {
               <Zap className="h-3 w-3 mr-1" />
               AI Agent Active
             </Badge>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleControlCenter}
+              className="flex items-center gap-2"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Kafka Control Center
+            </Button>
           </div>
         </div>
 
         {/* Main Content */}
         <Tabs defaultValue="overview" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="metrics">Metrics</TabsTrigger>
             <TabsTrigger value="alerts">Alerts</TabsTrigger>
+            <TabsTrigger value="topic-lineage">Topic Lineage</TabsTrigger>
             <TabsTrigger value="ai-agent">AI Agent</TabsTrigger>
           </TabsList>
 
@@ -301,6 +318,10 @@ const Index = () => {
                 onInvestigate={handleInvestigateAlert}
               />
             ))}
+          </TabsContent>
+
+          <TabsContent value="topic-lineage">
+            <TopicLineage />
           </TabsContent>
 
           <TabsContent value="ai-agent">
