@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { MetricCard } from "@/components/MetricCard";
 import { AlertCard } from "@/components/AlertCard";
 import { AIAgent } from "@/components/AIAgent";
@@ -8,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Server, Activity, Zap, AlertTriangle, ExternalLink } from "lucide-react";
+import { Server, Activity, Zap, AlertTriangle, ExternalLink, Database } from "lucide-react";
 
 // Mock data types
 interface KafkaMetric {
@@ -241,6 +242,12 @@ const Index = () => {
               <Zap className="h-3 w-3 mr-1" />
               AI Agent Active
             </Badge>
+            <Link to="/kafka">
+              <Button variant="outline" size="sm" className="flex items-center gap-2">
+                <Database className="h-4 w-4" />
+                Kafka Config
+              </Button>
+            </Link>
             <Button
               variant="outline"
               size="sm"
@@ -248,7 +255,7 @@ const Index = () => {
               className="flex items-center gap-2"
             >
               <ExternalLink className="h-4 w-4" />
-              Kafka Control Center
+              Control Center
             </Button>
           </div>
         </div>
