@@ -15,7 +15,8 @@ import '@xyflow/react/dist/style.css';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { RefreshCw, ExternalLink } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { RefreshCw, ExternalLink, Filter } from "lucide-react";
 
 // Custom node types
 const ProducerNode = ({ data }: { data: any }) => (
@@ -237,6 +238,9 @@ export const TopicLineage = () => {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedTopic, setSelectedTopic] = useState<string>('all');
+  const [allNodes, setAllNodes] = useState(initialNodes);
+  const [allEdges, setAllEdges] = useState(initialEdges);
 
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge(params, eds)),
@@ -248,10 +252,48 @@ export const TopicLineage = () => {
     // Simulate refresh
     setTimeout(() => {
       const { nodes: newNodes, edges: newEdges } = generateTopicLineage();
-      setNodes(newNodes);
-      setEdges(newEdges);
+      setAllNodes(newNodes);
+      setAllEdges(newEdges);
+      filterByTopic(selectedTopic, newNodes, newEdges);
       setRefreshing(false);
     }, 1000);
+  };
+
+  const filterByTopic = (topicId: string, nodeList = allNodes, edgeList = allEdges) => {
+    if (topicId === 'all') {
+      setNodes(nodeList);
+      setEdges(edgeList);
+      return;
+    }
+
+    // Find connected producers and consumers for the selected topic
+    const connectedProducers = edgeList
+      .filter(edge => edge.target === topicId)
+      .map(edge => edge.source);
+    
+    const connectedConsumers = edgeList
+      .filter(edge => edge.source === topicId)
+      .map(edge => edge.target);
+
+    // Filter nodes to show only the topic and its connected producers/consumers
+    const filteredNodes = nodeList.filter(node => 
+      node.id === topicId || 
+      connectedProducers.includes(node.id) || 
+      connectedConsumers.includes(node.id)
+    );
+
+    // Filter edges to show only connections to/from the selected topic
+    const filteredEdges = edgeList.filter(edge => 
+      edge.source === topicId || edge.target === topicId
+    );
+
+    setNodes(filteredNodes);
+    setEdges(filteredEdges);
+  };
+
+  const handleTopicChange = (value: string) => {
+    setSelectedTopic(value);
+    filterByTopic(value);
   };
 
   const handleControlCenter = () => {
@@ -268,10 +310,25 @@ export const TopicLineage = () => {
           animated: edge.animated && Math.random() > 0.3, // Randomly toggle animation
         }))
       );
+      
+      // Update all edges for filtering consistency
+      setAllEdges((eds) => 
+        eds.map((edge) => ({
+          ...edge,
+          animated: edge.animated && Math.random() > 0.3,
+        }))
+      );
     }, 3000);
 
     return () => clearInterval(interval);
   }, [setEdges]);
+
+  const topicOptions = [
+    { value: 'all', label: 'All Topics' },
+    { value: 'user-events', label: 'user-events' },
+    { value: 'payment-events', label: 'payment-events' },
+    { value: 'notification-events', label: 'notification-events' },
+  ];
 
   return (
     <Card className="h-full bg-card/50 backdrop-blur-sm">
@@ -287,6 +344,21 @@ export const TopicLineage = () => {
             </p>
           </div>
           <div className="flex gap-2">
+            <div className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-muted-foreground" />
+              <Select value={selectedTopic} onValueChange={handleTopicChange}>
+                <SelectTrigger className="w-[180px]">
+                  <SelectValue placeholder="Filter by topic" />
+                </SelectTrigger>
+                <SelectContent>
+                  {topicOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <Button
               variant="outline"
               size="sm"
