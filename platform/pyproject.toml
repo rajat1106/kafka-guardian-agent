@@ -1,0 +1,18 @@
+[project]
+name = "guardian-platform"
+version = "2.0.0"
+description = "Shared contracts, Kafka transport and config for Kafka Guardian Agent"
+requires-python = ">=3.11"
+dependencies = [
+    "aiokafka>=0.11.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "structlog>=24.4",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["guardian_platform*"]

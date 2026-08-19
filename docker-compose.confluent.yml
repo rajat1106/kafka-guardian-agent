@@ -1,0 +1,36 @@
+# Overlay for running against Confluent Cloud instead of the bundled broker.
+#
+#   1. Fill the KAFKA_* Confluent settings in .env
+#   2. docker compose -f docker-compose.yml -f docker-compose.confluent.yml up
+#
+# The local broker is scaled to zero rather than removed, so switching back
+# is a one-command change. Everything else is unchanged: the services read
+# their Kafka target from the same env vars either way.
+
+services:
+  kafka:
+    deploy:
+      replicas: 0
+    profiles: ["disabled"]
+
+  fleet:
+    environment:
+      KAFKA_PROVIDER: confluent
+    depends_on: !reset []
+
+  detector:
+    environment:
+      KAFKA_PROVIDER: confluent
+    depends_on: !reset []
+
+  guardian:
+    environment:
+      KAFKA_PROVIDER: confluent
+    depends_on:
+      postgres: {condition: service_healthy}
+      opa: {condition: service_started}
+
+  api:
+    environment:
+      KAFKA_PROVIDER: confluent
+    depends_on: !reset []

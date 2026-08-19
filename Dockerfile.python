@@ -1,0 +1,18 @@
+# Shared image for every Python service. One image, different commands —
+# the services are small and share a dependency set, so separate images
+# would cost build time and cache hits for no benefit.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY platform /app/platform
+COPY services /app/services
+RUN pip install --no-cache-dir -e /app/platform
+
+# Each service is launched with its own working directory so sibling
+# modules (simulation.py, detection.py, ...) import cleanly.
+CMD ["python", "-c", "print('specify a service command')"]
