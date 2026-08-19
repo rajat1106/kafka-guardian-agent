@@ -16,6 +16,7 @@ import { MetricCard } from "@/components/MetricCard";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { AgentReasoning } from "@/components/AgentReasoning";
 import { ActionLog } from "@/components/ActionLog";
+import { IncidentDetailDialog } from "@/components/IncidentDetail";
 import { ClusterBanner } from "@/components/ClusterBanner";
 import { useGuardian } from "@/hooks/useGuardian";
 import type { Diagnosis } from "@/lib/api";
@@ -32,6 +33,7 @@ const Operations = () => {
     useGuardian();
   const [chaosOn, setChaosOn] = useState(true);
   const [focus, setFocus] = useState<string | null>(null);
+  const [openIncident, setOpenIncident] = useState<string | null>(null);
 
   const services = useMemo(() => Object.values(state.metrics), [state.metrics]);
   const selected = focus ?? services[0]?.service ?? null;
@@ -59,6 +61,8 @@ const Operations = () => {
 
   return (
     <div className="p-4 md:p-6">
+      <IncidentDetailDialog incidentId={openIncident}
+                            onClose={() => setOpenIncident(null)} />
       <div className="mx-auto max-w-[1600px] space-y-4">
         <div className="flex flex-wrap items-center gap-3">
           <div>
@@ -215,7 +219,7 @@ const Operations = () => {
               </TabsList>
 
               <TabsContent value="actions" className="mt-3">
-                <ActionLog actions={state.actions} />
+                <ActionLog actions={state.actions} onOpen={setOpenIncident} />
               </TabsContent>
 
               <TabsContent value="anomalies" className="mt-3">
@@ -272,9 +276,10 @@ const Operations = () => {
                       )}
                       <div className="space-y-2">
                         {state.outcomes.map((o) => (
-                          <div
+                          <button
                             key={o.outcome_id}
-                            className="rounded-lg border border-border/50 p-2.5"
+                            onClick={() => setOpenIncident(o.incident_id)}
+                            className="w-full rounded-lg border border-border/50 p-2.5 text-left transition-colors hover:border-primary/40 hover:bg-muted/30"
                           >
                             <div className="flex flex-wrap items-center gap-2">
                               <Badge
@@ -296,7 +301,7 @@ const Operations = () => {
                             <p className="mt-1 text-xs text-muted-foreground">
                               {o.verification_detail}
                             </p>
-                          </div>
+                          </button>
                         ))}
                       </div>
                     </ScrollArea>

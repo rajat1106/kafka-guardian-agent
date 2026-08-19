@@ -9,6 +9,43 @@ Built from the architecture in
 [The Future of Self-Healing Infrastructure: Agentic AI + Event Streaming](https://www.linkedin.com/pulse/future-self-healing-infrastructure-agentic-ai-event-streaming-harne-xgjzc/),
 rebuilt for 2026.
 
+## Run it
+
+You need Docker. Nothing else — no API key, no Kafka, no Python.
+
+```bash
+git clone https://github.com/rajat1106/kafka-guardian-agent
+cd kafka-guardian-agent
+./start.sh
+```
+
+Then open **http://localhost:5173**.
+
+`start.sh` starts Docker if it is not running, creates your `.env`, builds the
+stack, waits for it to be ready, and prints the link. First run takes about a
+minute; after that, seconds.
+
+To stop: `./stop.sh` (add `--clean` to wipe incident history too).
+
+<details>
+<summary>Prefer to run it by hand?</summary>
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+</details>
+
+### If the dashboard looks empty
+
+Almost always the infrastructure-chaos buttons stopped or froze a container.
+Go to **Connections → Demo cluster → Restore everything**, or run:
+
+```bash
+curl -X POST http://localhost:8080/api/demo/recover
+```
+
 ```
  chaos injector ──inject──▶ demo fleet (payment · user · notification)
                                  │ produce/consume + emit metrics
@@ -32,15 +69,6 @@ rebuilt for 2026.
  │  → actuate → verify → learn                                 │
  │  step-journaled to Postgres (crash-resumable)               │
  └─────────────────────────────────────────────────────────────┘
-```
-
-## Quick start
-
-```bash
-git clone https://github.com/rajat1106/kafka-guardian-agent
-cd kafka-guardian-agent
-cp .env.example .env
-docker compose up --build
 ```
 
 Then open **http://localhost:5173**. Within a couple of minutes the chaos

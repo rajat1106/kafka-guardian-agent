@@ -117,6 +117,59 @@ async def start_cluster() -> dict[str, Any]:
             "status": await status()}
 
 
+async def recover_cluster() -> dict[str, Any]:
+    """Put the demo cluster back to healthy, whatever was done to it.
+
+    Chaos can leave a container paused, stopped, or both across several
+    services, and asking the user to remember which button caused which state
+    is a bad trade. This is the single undo: unpause anything frozen, start
+    anything stopped, broker first, then wait for it to accept connections
+    before the services that depend on it.
+    """
+    steps: list[dict[str, Any]] = []
+    current = await status()
+    if not current.get("available"):
+        return {"ok": False, "error": current.get("error"), "steps": []}
+
+    by_service = {c["service"]: c for c in current["containers"]}
+
+    for service in DEMO_SERVICES:
+        info = by_service.get(service, {})
+        state = info.get("status")
+        if state == "paused":
+            steps.append(await act(service, "unpause"))
+        elif state != "running":
+            steps.append(await act(service, "start"))
+        else:
+            steps.append({"ok": True, "service": service, "verb": "none",
+                          "status": "already running"})
+
+        if service == BROKER:
+            # Dependants fail their own startup if they connect before the
+            # broker is answering, which is what makes a naive "start all"
+            # leave the fleet down after a pause.
+            await _await_broker(timeout=45)
+
+    final = await status()
+    return {"ok": final.get("all_up", False), "steps": steps, "status": final}
+
+
+async def _await_broker(timeout: float = 45.0) -> bool:
+    """Wait for the broker container to report healthy again."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        state = await status()
+        broker = next((c for c in state.get("containers", [])
+                       if c["service"] == BROKER), None)
+        if broker and broker["running"] and broker.get("health") in (None, "healthy"):
+            return True
+        await asyncio.sleep(3)
+    log.warning("broker_not_healthy_in_time", timeout=timeout)
+    return False
+
+
 async def stop_cluster() -> dict[str, Any]:
     results = [await act(s, "stop") for s in reversed(DEMO_SERVICES)]
     return {"ok": all(r["ok"] for r in results), "steps": results,

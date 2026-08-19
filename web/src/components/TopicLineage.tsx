@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils";
 import {
   Boxes, GitBranch, Layers, ShieldAlert, Sparkles, Users, Zap,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Loader2, LifeBuoy } from "lucide-react";
 import { api, type LineageEdge, type LineageGraph, type LineageNode } from "@/lib/api";
 
 /* ── node renderers ──────────────────────────────────────────────── */
@@ -255,11 +257,20 @@ function layout(graph: LineageGraph): { nodes: Node[]; edges: Edge[] } {
 
 export const TopicLineage = ({ height = 480 }: { height?: number }) => {
   const [graph, setGraph] = useState<LineageGraph | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [recovering, setRecovering] = useState(false);
+
+  const refresh = () =>
+    api.lineage()
+      .then((g) => { setGraph(g); setLoadError(g.error ?? null); })
+      .catch((e) => setLoadError(String(e)));
 
   useEffect(() => {
     let alive = true;
     const tick = () =>
-      api.lineage().then((g) => alive && setGraph(g)).catch(() => undefined);
+      api.lineage()
+        .then((g) => { if (alive) { setGraph(g); setLoadError(g.error ?? null); } })
+        .catch((e) => alive && setLoadError(String(e)));
     tick();
     const timer = setInterval(tick, 2000);
     return () => {
@@ -267,6 +278,12 @@ export const TopicLineage = ({ height = 480 }: { height?: number }) => {
       clearInterval(timer);
     };
   }, []);
+
+  const recover = async () => {
+    setRecovering(true);
+    try { await api.demoRecover(); await refresh(); }
+    finally { setRecovering(false); }
+  };
 
   const { nodes, edges } = useMemo(
     () => (graph ? layout(graph) : { nodes: [], edges: [] }),
@@ -300,6 +317,35 @@ export const TopicLineage = ({ height = 480 }: { height?: number }) => {
         </CardTitle>
       </CardHeader>
       <CardContent className="p-0">
+        {(graph && graph.nodes.length === 0) ? (
+          // A blank canvas gives no clue what went wrong. The overwhelmingly
+          // likely cause is that infrastructure chaos left the demo services
+          // stopped, so say that and offer the one action that fixes it.
+          <div style={{ height }}
+               className="flex flex-col items-center justify-center gap-3 border-t border-border/50 px-6 text-center">
+            <LifeBuoy className="h-8 w-8 text-muted-foreground/60" />
+            <div className="max-w-md space-y-1.5">
+              <p className="text-sm font-medium">Nothing to draw yet</p>
+              <p className="text-xs text-muted-foreground">
+                The topology is built from the running services. They are not
+                reporting — usually because infrastructure chaos stopped or
+                froze a container, or the demo cluster has not been started.
+              </p>
+              {loadError && (
+                <p className="font-mono text-[11px] text-rose-400/90">{loadError}</p>
+              )}
+            </div>
+            <Button size="sm" onClick={recover} disabled={recovering}>
+              {recovering
+                ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                : <LifeBuoy className="mr-1.5 h-4 w-4" />}
+              {recovering ? "Restoring the cluster…" : "Restore the demo cluster"}
+            </Button>
+            <p className="text-[11px] text-muted-foreground">
+              Unpauses anything frozen and restarts anything stopped.
+            </p>
+          </div>
+        ) : (
         <div style={{ height }} className="border-t border-border/50">
           <ReactFlow
             nodes={nodes}
@@ -330,6 +376,7 @@ export const TopicLineage = ({ height = 480 }: { height?: number }) => {
             />
           </ReactFlow>
         </div>
+        )}
       </CardContent>
     </Card>
   );

@@ -11,7 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   AlertCircle, Boxes, Brain, Bell, CheckCircle2, Container, Gauge, Loader2,
-  Play, Plug, Square, Zap,
+  LifeBuoy, Play, Plug, Square, Zap,
 } from "lucide-react";
 import {
   api, type PluginState, type PluginsResponse, type SlotSpec, type ProviderSpec,
@@ -336,6 +336,13 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
         </div>
 
         <div className="flex flex-wrap gap-2">
+          {/* First, because it is what you want after breaking something. */}
+          <Button size="sm" disabled={!!busy}
+                  onClick={() => run("recover", api.demoRecover)}>
+            {busy === "recover" ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                                : <LifeBuoy className="mr-1.5 h-4 w-4" />}
+            Restore everything
+          </Button>
           <Button size="sm" variant="outline" disabled={!!busy}
                   onClick={() => run("start", api.demoStart)}>
             {busy === "start" ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
@@ -375,6 +382,11 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
               <div className="mb-1.5 text-xs font-medium text-muted-foreground">
                 Break the infrastructure — acts on the Docker containers themselves
               </div>
+              <p className="mb-1.5 text-[11px] text-amber-400/80">
+                These stop or freeze real containers, so the dashboard will go
+                quiet until you restore. “Restore everything” above undoes all
+                of them at once.
+              </p>
               <div className="grid gap-1.5 sm:grid-cols-2">
                 {scenarios.infrastructure.map((s) => (
                   <div key={s.key}
@@ -398,7 +410,7 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
                       <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]"
                               disabled={!!busy}
                               onClick={() => run(`${s.key}-r`, () => api.recoverInfra(s.key))}>
-                        Recover
+                        Undo this one
                       </Button>
                     </div>
                   </div>

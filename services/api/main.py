@@ -289,6 +289,85 @@ async def state() -> dict:
     return P.snapshot()
 
 
+
+@app.get("/api/incidents")
+async def incidents() -> dict:
+    """Closed incidents, newest first — the list the UI paginates."""
+    return {"incidents": list(P.outcomes)}
+
+
+@app.get("/api/incidents/{incident_id}")
+async def incident_detail(incident_id: str) -> dict:
+    """Everything that happened in one incident, assembled into a timeline.
+
+    Correlating four topics in the browser would mean shipping all of them to
+    every client and re-deriving the story on each render. The projection
+    already holds them here, keyed by incident, so the join belongs here.
+    """
+    anomalies = [a for a in P.anomalies if a.get("service")]
+    actions = [a for a in P.actions if a.get("incident_id") == incident_id]
+    outcome = next((o for o in P.outcomes if o.get("incident_id") == incident_id), None)
+    diagnosis = next(
+        (d for d in P.decisions
+         if d.get("incident_id") == incident_id and "root_cause" in d),
+        None,
+    )
+    approval = next(
+        (d for d in P.decisions
+         if d.get("incident_id") == incident_id and "decisions" in d),
+        None,
+    )
+
+    service = (outcome or diagnosis or {}).get("service")
+    if not service and actions:
+        service = actions[0].get("action", {}).get("target")
+
+    # Anomalies carry no incident id — they are what *opened* the incident.
+    # Match on service within a window around the incident, which is how the
+    # agent correlated them in the first place.
+    window: list[dict] = []
+    if service and outcome:
+        try:
+            end = datetime.fromisoformat(outcome["ts"].replace("Z", "+00:00"))
+            span = float(outcome.get("mttr_seconds") or 0) + 30
+            start = end.timestamp() - span
+            window = [
+                a for a in anomalies
+                if a.get("service") == service
+                and start <= datetime.fromisoformat(
+                    a["ts"].replace("Z", "+00:00")).timestamp() <= end.timestamp()
+            ]
+        except (ValueError, KeyError, TypeError):
+            window = [a for a in anomalies if a.get("service") == service][:6]
+
+    # A flat, ordered list is what a timeline component wants; building it here
+    # keeps ordering rules in one place instead of in every consumer.
+    timeline: list[dict] = []
+    for a in reversed(window):
+        timeline.append({"kind": "detected", "ts": a["ts"], "payload": a})
+    if diagnosis:
+        timeline.append({"kind": "diagnosed", "ts": diagnosis["ts"],
+                         "payload": diagnosis})
+    if approval:
+        timeline.append({"kind": "held_for_approval",
+                         "ts": approval.get("requested_at", ""), "payload": approval})
+    for r in sorted(actions, key=lambda x: x.get("ts", "")):
+        timeline.append({"kind": "acted", "ts": r["ts"], "payload": r})
+    if outcome:
+        timeline.append({"kind": "closed", "ts": outcome["ts"], "payload": outcome})
+
+    return {
+        "incident_id": incident_id,
+        "service": service,
+        "outcome": outcome,
+        "diagnosis": diagnosis,
+        "approval": approval,
+        "actions": sorted(actions, key=lambda x: x.get("ts", "")),
+        "anomalies": window,
+        "timeline": timeline,
+    }
+
+
 @app.get("/api/cluster")
 async def cluster() -> dict:
     ks = kafka_settings()
@@ -502,6 +581,12 @@ async def demo_status() -> dict:
 @app.post("/api/demo/start")
 async def demo_start() -> dict:
     return await demo_control.start_cluster()
+
+
+@app.post("/api/demo/recover")
+async def demo_recover() -> dict:
+    """One-click undo for anything chaos did to the demo cluster."""
+    return await demo_control.recover_cluster()
 
 
 @app.post("/api/demo/stop")

@@ -219,6 +219,8 @@ export interface LineageGraph {
   edges: LineageEdge[];
   cluster?: string;
   provider?: string;
+  /** Present when the graph could not be built — surfaced, not swallowed. */
+  error?: string;
 }
 
 
@@ -290,6 +292,23 @@ export interface PluginsResponse {
   plugins?: PluginState[];
 }
 
+export interface TimelineEntry {
+  kind: "detected" | "diagnosed" | "held_for_approval" | "acted" | "closed";
+  ts: string;
+  payload: Record<string, unknown>;
+}
+
+export interface IncidentDetail {
+  incident_id: string;
+  service: string | null;
+  outcome: Outcome | null;
+  diagnosis: Diagnosis | null;
+  approval: ApprovalRequest | null;
+  actions: ActionResult[];
+  anomalies: Anomaly[];
+  timeline: TimelineEntry[];
+}
+
 export const emptyState = (): GuardianState => ({
   metrics: {},
   series: {},
@@ -312,6 +331,7 @@ export const api = {
   scenarios: () => get<{ scenarios: ScenarioInfo[] }>("/api/scenarios"),
   services: () => get<Record<string, unknown>>("/api/services"),
   lineage: () => get<LineageGraph>("/api/lineage"),
+  incident: (id: string) => get<IncidentDetail>(`/api/incidents/${id}`),
 
   inject: async (key: string) => {
     const res = await fetch(`${API_URL}/api/scenarios/${key}/inject`, { method: "POST" });
@@ -358,6 +378,10 @@ export const api = {
 
   demoStart: async () => {
     const r = await fetch(`${API_URL}/api/demo/start`, { method: "POST" });
+    return r.json();
+  },
+  demoRecover: async () => {
+    const r = await fetch(`${API_URL}/api/demo/recover`, { method: "POST" });
     return r.json();
   },
   demoStop: async () => {

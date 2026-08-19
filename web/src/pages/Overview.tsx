@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { StatTile } from "@/components/StatTile";
+import { IncidentDetailDialog } from "@/components/IncidentDetail";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { useGuardian } from "@/hooks/useGuardian";
 import {
@@ -26,6 +27,7 @@ import {
  */
 const Overview = () => {
   const { state, cluster, connected, approve } = useGuardian();
+  const [openIncident, setOpenIncident] = useState<string | null>(null);
 
   const services = Object.values(state.metrics);
   const unhealthy = services.filter((s) => !s.healthy);
@@ -62,6 +64,8 @@ const Overview = () => {
 
   return (
     <div className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 md:px-6">
+      <IncidentDetailDialog incidentId={openIncident}
+                            onClose={() => setOpenIncident(null)} />
       {/* headline */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -154,10 +158,12 @@ const Overview = () => {
             {feed.map((o) => {
               const c = plainCause(o.root_cause);
               return (
-                <div
+                <button
                   key={o.outcome_id}
+                  onClick={() => setOpenIncident(o.incident_id)}
                   className={cn(
-                    "rounded-lg border-l-2 bg-muted/25 py-2.5 pl-3 pr-3",
+                    "w-full rounded-lg border-l-2 bg-muted/25 py-2.5 pl-3 pr-3 text-left",
+                    "transition-colors hover:bg-muted/50",
                     o.resolved ? "border-l-emerald-400" : "border-l-amber-400",
                   )}
                 >
@@ -178,7 +184,10 @@ const Overview = () => {
                       Risk if ignored: {c.risk}
                     </p>
                   )}
-                </div>
+                  <p className="mt-1 text-[11px] text-primary/80">
+                    Click to see exactly what the agent ran →
+                  </p>
+                </button>
               );
             })}
           </CardContent>
