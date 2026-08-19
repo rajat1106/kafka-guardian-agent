@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Deque
@@ -47,12 +48,30 @@ GUARDIAN_URL = os.getenv("GUARDIAN_URL", "http://guardian:8083").rstrip("/")
 # disappears just before clicking it would become a no-op.
 APPROVAL_TTL_SECONDS = 285.0
 
+# A fresh consumer-group id per process start. os.getpid() is not enough:
+# inside a container the PID is always 1, so the group id is stable across
+# restarts, Kafka finds committed offsets, and auto_offset_reset="earliest"
+# is silently ignored — the replay never happens. Each API instance owns its
+# own projection and should not share offsets with a previous one.
+INSTANCE = uuid.uuid4().hex[:8]
+
 app = FastAPI(title="Guardian API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
 _producer: EventProducer | None = None
+
+
+def _age_seconds(iso: str | None) -> float:
+    """Seconds since an ISO timestamp; treats a missing value as ancient."""
+    if not iso:
+        return float("inf")
+    try:
+        ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return float("inf")
+    return (datetime.now(timezone.utc) - ts).total_seconds()
 
 
 class Projection:
@@ -158,8 +177,20 @@ HUB = Hub()
 
 
 # ── consumers ────────────────────────────────────────────────────────
-async def _pump(spec, model, group: str, kind: str, handler) -> None:
-    consumer = EventConsumer([spec], f"api-{group}-{os.getpid()}", model)
+async def _pump(spec, model, group: str, kind: str, handler,
+                replay: bool = False) -> None:
+    """Fold one topic into the projection.
+
+    `replay` reads the topic from the beginning. The guardian topics are low
+    volume with days of retention, and a read model that starts at `latest`
+    shows an empty dashboard on every restart even though the history is
+    sitting in Kafka. Replaying it is what makes the log the source of truth
+    rather than the process's uptime. Telemetry stays at `latest` — nobody
+    needs six hours of metric backfill to see a live chart.
+    """
+    consumer = EventConsumer(
+        [spec], f"api-{group}-{INSTANCE}", model, from_beginning=replay
+    )
     await consumer.start()
     try:
         async for event in consumer:
@@ -184,7 +215,11 @@ def _on_decision(raw: dict) -> dict:
     P.decisions.appendleft(raw)
     # An ApprovalRequest is distinguishable by carrying a plan and decisions.
     if "plan_id" in raw and "decisions" in raw:
-        P.add_approval(raw)
+        # Replay makes stale approval requests reappear. Anything older than
+        # the agent's own timeout can no longer be answered, so surfacing it
+        # would give the operator a button that does nothing.
+        if _age_seconds(raw.get("requested_at")) < APPROVAL_TTL_SECONDS:
+            P.add_approval(raw)
     return raw
 
 
@@ -210,7 +245,8 @@ class _Passthrough(BaseModel):
         return super().model_dump(**kw)
 
 
-async def _pump_raw(spec, group: str, kind: str, handler) -> None:
+async def _pump_raw(spec, group: str, kind: str, handler,
+                    replay: bool = False) -> None:
     """For topics carrying more than one payload shape."""
     from aiokafka import AIOKafkaConsumer
 
@@ -219,9 +255,9 @@ async def _pump_raw(spec, group: str, kind: str, handler) -> None:
     ks = kafka_settings()
     consumer = AIOKafkaConsumer(
         ks.topic(spec.name),
-        group_id=f"api-{group}-{os.getpid()}",
+        group_id=f"api-{group}-{INSTANCE}",
         value_deserializer=lambda v: json.loads(v.decode()),
-        auto_offset_reset="latest",
+        auto_offset_reset="earliest" if replay else "latest",
         **client_kwargs(ks),
     )
     await consumer.start()
@@ -261,6 +297,121 @@ async def cluster() -> dict:
         "replication_factor": ks.replication_factor,
         "capabilities": ks.capabilities.model_dump(),
         "guardian": guardian,
+    }
+
+
+
+# ── lineage ──────────────────────────────────────────────────────────
+# Business topic each demo service consumes from. The fleet simulates
+# services, not topics, so the mapping lives here rather than being
+# invented in the browser.
+SERVICE_TOPICS = {
+    "payment-service": "payment-events",
+    "user-service": "user-events",
+    "notification-service": "notification-events",
+}
+
+UPSTREAM_PRODUCERS = {
+    "payment-events": ["checkout-api", "billing-worker"],
+    "user-events": ["web-app", "mobile-app"],
+    "notification-events": ["user-events-fanout"],
+}
+
+
+@app.get("/api/lineage")
+async def lineage() -> dict:
+    """Producer → topic → consumer-group graph with live metrics.
+
+    Built from fleet state rather than a static fixture, so partition counts,
+    replica counts and lag are whatever the cluster actually reports — and a
+    node the agent has just acted on shows it.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            fleet = (await c.get(f"{FLEET_URL}/services")).json()
+    except Exception as exc:  # noqa: BLE001
+        return {"nodes": [], "edges": [], "error": str(exc)}
+
+    ks = kafka_settings()
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    # Which services the agent has touched recently, so the graph can show it.
+    recent_actions: dict[str, dict] = {}
+    for a in list(P.actions)[:12]:
+        target = a.get("action", {}).get("target")
+        if target and target not in recent_actions:
+            recent_actions[target] = {
+                "type": a["action"]["type"],
+                "success": a.get("success", False),
+                "executed": a.get("executed", False),
+                "blast_radius": a.get("decision", {}).get("blast_radius"),
+                "ts": a.get("ts"),
+            }
+
+    # Services with a plan parked for human approval.
+    awaiting: set[str] = set()
+    for req in P.pending_approvals.values():
+        for act in req.get("actions", []):
+            target = act.get("target")
+            if target:
+                awaiting.add(target)
+
+    for service, info in fleet.items():
+        latest = info.get("latest") or {}
+        topic = SERVICE_TOPICS.get(service, f"{service}-events")
+
+        for producer in UPSTREAM_PRODUCERS.get(topic, []):
+            pid = f"prod:{producer}"
+            if not any(n["id"] == pid for n in nodes):
+                nodes.append({
+                    "id": pid, "kind": "producer", "label": producer,
+                    "active": info.get("healthy", True),
+                })
+            edges.append({
+                "id": f"{pid}->topic:{topic}", "source": pid, "target": f"topic:{topic}",
+                "rate": round((latest.get("messages_per_sec") or 0)
+                              / max(len(UPSTREAM_PRODUCERS.get(topic, [1])), 1), 1),
+                "healthy": True,
+            })
+
+        nodes.append({
+            "id": f"topic:{topic}", "kind": "topic", "label": ks.topic(topic),
+            "partitions": info.get("partition_count", 0),
+            "replication_factor": ks.replication_factor,
+            "messages_per_sec": latest.get("messages_per_sec", 0),
+            "under_replicated": latest.get("under_replicated_partitions", 0),
+        })
+
+        lag = latest.get("consumer_lag", 0)
+        nodes.append({
+            "id": f"group:{service}", "kind": "consumer", "label": service,
+            "group_id": info.get("consumer_group"),
+            "replicas": info.get("replicas", 0),
+            "partitions": info.get("partition_count", 0),
+            "lag": lag,
+            "healthy": info.get("healthy", True),
+            "memory_used_pct": latest.get("memory_used_pct", 0),
+            "p99_latency_ms": latest.get("p99_latency_ms", 0),
+            "error_rate": latest.get("error_rate", 0),
+            "db_pool_used": latest.get("db_pool_used", 0),
+            "db_pool_size": latest.get("db_pool_size", 1),
+            "region": info.get("region", ""),
+            "active_fault": info.get("active_fault"),
+            "recent_action": recent_actions.get(service),
+            "awaiting_approval": service in awaiting,
+        })
+        edges.append({
+            "id": f"topic:{topic}->group:{service}",
+            "source": f"topic:{topic}", "target": f"group:{service}",
+            "rate": latest.get("messages_per_sec", 0),
+            "lag": lag,
+            "healthy": info.get("healthy", True) and lag < 500,
+        })
+
+    return {
+        "nodes": nodes, "edges": edges,
+        "cluster": ks.describe(), "provider": ks.provider.value,
     }
 
 
@@ -343,13 +494,13 @@ async def startup() -> None:
         asyncio.create_task(_pump(TELEMETRY_METRICS, ServiceMetrics, "metrics",
                                   "metrics", _on_metrics)),
         asyncio.create_task(_pump(GUARDIAN_ANOMALIES, Anomaly, "anomalies",
-                                  "anomaly", _on_anomaly)),
+                                  "anomaly", _on_anomaly, replay=True)),
         asyncio.create_task(_pump(GUARDIAN_ACTIONS, ActionResult, "actions",
-                                  "action", _on_action)),
+                                  "action", _on_action, replay=True)),
         asyncio.create_task(_pump_raw(GUARDIAN_DECISIONS, "decisions",
-                                      "decision", _on_decision)),
+                                      "decision", _on_decision, replay=True)),
         asyncio.create_task(_pump_raw(GUARDIAN_OUTCOMES, "outcomes",
-                                      "outcome", _on_outcome)),
+                                      "outcome", _on_outcome, replay=True)),
         asyncio.create_task(_reap_approvals()),
     ]
 

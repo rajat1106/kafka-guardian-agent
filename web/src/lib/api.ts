@@ -172,6 +172,55 @@ export interface ScenarioInfo {
   acceptable_actions: string[];
 }
 
+
+export interface LineageNode {
+  id: string;
+  kind: "producer" | "topic" | "consumer";
+  label: string;
+  active?: boolean;
+  // topic
+  partitions?: number;
+  replication_factor?: number;
+  messages_per_sec?: number;
+  under_replicated?: number;
+  // consumer group
+  group_id?: string;
+  replicas?: number;
+  lag?: number;
+  healthy?: boolean;
+  memory_used_pct?: number;
+  p99_latency_ms?: number;
+  error_rate?: number;
+  db_pool_used?: number;
+  db_pool_size?: number;
+  region?: string;
+  active_fault?: string | null;
+  awaiting_approval?: boolean;
+  recent_action?: {
+    type: string;
+    success: boolean;
+    executed: boolean;
+    blast_radius: number | null;
+    ts: string;
+  } | null;
+}
+
+export interface LineageEdge {
+  id: string;
+  source: string;
+  target: string;
+  rate?: number;
+  lag?: number;
+  healthy: boolean;
+}
+
+export interface LineageGraph {
+  nodes: LineageNode[];
+  edges: LineageEdge[];
+  cluster?: string;
+  provider?: string;
+}
+
 export const emptyState = (): GuardianState => ({
   metrics: {},
   series: {},
@@ -193,6 +242,7 @@ export const api = {
   cluster: () => get<ClusterInfo>("/api/cluster"),
   scenarios: () => get<{ scenarios: ScenarioInfo[] }>("/api/scenarios"),
   services: () => get<Record<string, unknown>>("/api/services"),
+  lineage: () => get<LineageGraph>("/api/lineage"),
 
   inject: async (key: string) => {
     const res = await fetch(`${API_URL}/api/scenarios/${key}/inject`, { method: "POST" });

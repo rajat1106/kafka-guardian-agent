@@ -7,10 +7,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
-import { Activity, AlertTriangle, Bot, FlaskConical, Timer, Zap } from "lucide-react";
+import {
+  Activity, AlertTriangle, Bot, FlaskConical, GitBranch, Timer, Zap,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 import { MetricCard } from "@/components/MetricCard";
+import { TopicLineage } from "@/components/TopicLineage";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { AgentReasoning } from "@/components/AgentReasoning";
 import { ActionLog } from "@/components/ActionLog";
@@ -121,6 +124,9 @@ const Index = () => {
             status={state.pending_approvals.length > 0 ? "warning" : "healthy"}
           />
         </div>
+
+        {/* the system, as a graph — the shape of the platform the agent guards */}
+        <TopicLineage height={470} />
 
         <div className="grid gap-4 lg:grid-cols-3">
           {/* left: telemetry */}

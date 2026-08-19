@@ -46,6 +46,12 @@ docker compose up --build
 Then open **http://localhost:5173**. Within a couple of minutes the chaos
 engine breaks something and you watch the agent handle it.
 
+The dashboard leads with a live **topic lineage graph** — producers → topics →
+consumer groups, with real partition counts, replica counts, lag, heap and
+pool pressure on every node. Nodes light up as the agent acts on them, and a
+consumer group sitting at its partition ceiling is marked `cap`, because that
+is the constraint the policy engine will refuse to let the agent scale past.
+
 No API key is required. Without one the agent runs its deterministic
 planner and the whole demo still works; add a key to enable LLM diagnosis.
 
