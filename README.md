@@ -57,9 +57,9 @@ crossed. Measured lead times, from the eval harness:
 
 | scenario | lead time before degradation |
 |---|---|
-| consumer heap exhaustion (OOM) | 56 s |
-| DB pool exhaustion cascade | 24 s |
-| consumer lag explosion | 42 s |
+| consumer heap exhaustion (OOM) | 42 s |
+| DB pool exhaustion cascade | 26 s |
+| consumer lag explosion | 28 s |
 | under-replicated partitions | >118 s |
 | region outage | 0 s (instantaneous by nature) |
 
@@ -135,15 +135,15 @@ python evals/run_eval.py --provider confluent
 
 ```
 scenario            detect     lead  root cause                        action                 grade
-consumer_oom           yes      56s  ok  consumer_capacity_shortfall   scale_consumer_group   correct
-pool_exhaustion        yes      24s  ok  db_connection_pool_exhaustion adjust_db_pool         correct
-region_outage          yes       0s  ok  region_unavailable            failover_region        correct
-lag_spike              yes      42s  ok  consumer_capacity_shortfall   scale_consumer_group   correct
-under_replicated       yes    >118s  ok  partition_replication_degraded roll_broker           correct
+consumer_oom           yes     42 s  ok  consumer_capacity_shortfall   scale_consumer_group   correct
+pool_exhaustion        yes     26 s  ok  db_connection_pool_exhaustion adjust_db_pool         correct
+region_outage          yes      0 s  ok  region_unavailable            failover_region        correct
+lag_spike              yes     28 s  ok  consumer_capacity_shortfall   scale_consumer_group   correct
+under_replicated       yes   >118 s  ok  partition_replication_degraded roll_broker           correct
   detection rate       5/5
   root-cause accuracy  5/5
   action correct       5/5
-  median lead time     49s (max 118s)
+  median lead time     35s (max 118s)
   false-positive rate  0.0028  (1 anomaly / 360 healthy observations)
 ```
 

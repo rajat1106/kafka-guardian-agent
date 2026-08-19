@@ -51,6 +51,20 @@ APPROVAL_TIMEOUT_SECONDS = 300.0
 # settling does not look like a fresh incident.
 POST_INCIDENT_COOLDOWN_SECONDS = 45.0
 
+# Absolute health bounds, used when an incident has no in-incident baseline
+# for its verification metric — which happens whenever the metric that opened
+# the incident is not the metric the remedy targets. Mirrors the detector's
+# thresholds.
+HEALTHY_BELOW: dict[str, float] = {
+    "consumer_lag": 500.0,
+    "memory_used_pct": 85.0,
+    "p99_latency_ms": 250.0,
+    "error_rate": 0.02,
+    "cpu_pct": 85.0,
+    "db_pool_utilisation": 0.80,
+    "under_replicated_partitions": 1.0,
+}
+
 
 class GuardianAgent:
     def __init__(
@@ -135,12 +149,19 @@ class GuardianAgent:
             done = await self._memory.completed_steps(incident.incident_id)
 
             # 1. Correlate — let related anomalies arrive before deciding.
+            # Bracket the wait with two reads so the correlation window also
+            # yields a measured rate of change. The detector's own anomaly
+            # window is a poor source for this: at the moment of detection it
+            # is still mostly pre-incident samples, so a slope fitted to it
+            # underestimates the deficit and the planner under-provisions.
+            before = await self._fleet_state(incident.service)
             await asyncio.sleep(CORRELATION_WINDOW_SECONDS)
             incident.state = IncidentState.DIAGNOSING
             await self._journal(incident, "correlated",
                                 {"anomaly_count": len(incident.anomalies)})
 
             current = await self._fleet_state(incident.service)
+            current["rates"] = self._rates(before, current, CORRELATION_WINDOW_SECONDS)
 
             # 2. Recall.
             similar = await self._memory.similar(incident)
@@ -189,6 +210,20 @@ class GuardianAgent:
             )
 
     # ── steps ────────────────────────────────────────────────────────
+    @staticmethod
+    def _rates(before: dict, after: dict, seconds: float) -> dict:
+        """Per-second rate of change for the metrics a planner sizes against."""
+        b = (before or {}).get("latest") or {}
+        a = (after or {}).get("latest") or {}
+        rates: dict[str, float] = {}
+        for metric in ("consumer_lag", "memory_used_pct", "db_pool_used"):
+            if metric in b and metric in a:
+                try:
+                    rates[metric] = (float(a[metric]) - float(b[metric])) / seconds
+                except (TypeError, ValueError):
+                    continue
+        return rates
+
     async def _diagnose(
         self, incident: Incident, current: dict, similar: list[dict]
     ) -> tuple[Diagnosis, RemediationPlan]:
@@ -336,8 +371,22 @@ class GuardianAgent:
         before = next(
             (a.value for a in reversed(incident.anomalies) if a.metric == metric), None
         )
-        if before is None or first is None:
-            return True, f"could not re-read {metric}; assuming no regression"
+        if first is None:
+            return False, f"could not read {metric} after acting; cannot confirm recovery"
+
+        if before is None:
+            # The incident was opened by a different metric than the one the
+            # remedy targets, so there is no in-incident baseline to compare
+            # against. Fall back to an absolute health check rather than
+            # assuming success — "no baseline" is not evidence of recovery.
+            bound = HEALTHY_BELOW.get(metric)
+            if bound is None:
+                return False, f"no baseline or health bound for {metric}; escalating"
+            ok = first < bound
+            return ok, (
+                f"{metric} = {first:.2f} vs healthy bound {bound:.2f} "
+                f"({'within' if ok else 'above'} bound; no in-incident baseline)"
+            )
 
         # A draining backlog keeps rising for a moment after capacity is added,
         # so an absolute comparison at a single instant fails a remedy that is

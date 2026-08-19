@@ -12,10 +12,80 @@ the LLM planner fills.
 
 from __future__ import annotations
 
+import math
+
 from guardian_platform.config import ClusterCapabilities
 from guardian_platform.contracts import (
     Action, ActionType, Diagnosis, Incident, RemediationPlan,
 )
+from guardian_platform.stats import linear_slope
+
+# Fleet emits a metric window every two seconds.
+TICK_SECONDS = 2.0
+
+
+def _lag_rate(incident: Incident, current: dict) -> float:
+    """Lag growth in messages per second.
+
+    Prefers the rate the agent measured directly across the correlation
+    window. Falls back to a slope fitted to the detector's anomaly window,
+    which is available earlier but reads low — at detection time that window
+    is still mostly pre-incident samples.
+    """
+    measured = (current.get("rates") or {}).get("consumer_lag")
+    if measured is not None and measured > 0:
+        return float(measured)
+    for a in reversed(incident.anomalies):
+        if a.metric == "consumer_lag" and len(a.window) >= 4:
+            return linear_slope(a.window) / TICK_SECONDS
+    return 0.0
+
+
+# Size remedies so an existing backlog clears within this long, rather than
+# merely ceasing to grow. Capacity a hair above arrival technically fixes the
+# trend and still leaves a large backlog draining for several minutes, which
+# reads as a failed remediation and escalates.
+TARGET_DRAIN_SECONDS = 45.0
+
+# Headroom over the arrival rate. Arrival is not constant — it carries noise
+# and a diurnal swing — so sizing to exactly the observed rate leaves a margin
+# that the next fluctuation erases. Both terms are needed: headroom keeps the
+# backlog from regrowing, the drain term clears the one already there.
+ARRIVAL_HEADROOM = 1.25
+
+
+def _size_consumer_group(incident: Incident, current: dict) -> int:
+    """Work out how many consumers are actually needed.
+
+    Doubling the replica count is a guess. Sizing to just above the arrival
+    rate is a subtler mistake: it stops the backlog growing but leaves it
+    draining at a trickle, so verification sees lag still elevated and the
+    incident escalates even though the agent picked the right action.
+
+    Both the deficit and the backlog are observable. If the queue grows by
+    `deficit` messages a second while `arrival` arrive a second, the consumers
+    are between them clearing (arrival - deficit) — which gives a per-consumer
+    throughput under current conditions. The target is then the rate needed to
+    absorb arrivals *and* work off the existing backlog within
+    TARGET_DRAIN_SECONDS.
+    """
+    replicas = int(current.get("replicas", 2))
+    latest = current.get("latest") or {}
+    arrival = float(latest.get("messages_per_sec") or 0.0)
+    backlog = float(latest.get("consumer_lag") or 0.0)
+    deficit = _lag_rate(incident, current)   # messages per second
+
+    if arrival <= 0 or deficit <= 0 or replicas <= 0:
+        return replicas * 2                  # fall back to doubling
+
+    cleared = max(arrival - deficit, 1.0)
+    per_consumer = cleared / replicas
+    if per_consumer <= 0:
+        return replicas * 2
+
+    required_rate = (arrival * ARRIVAL_HEADROOM) + (backlog / TARGET_DRAIN_SECONDS)
+    needed = math.ceil(required_rate / per_consumer)
+    return max(needed, replicas + 1)
 
 
 def _metrics(incident: Incident) -> dict[str, float]:
@@ -278,39 +348,63 @@ def plan(
         )
 
     if cause == "consumer_capacity_shortfall":
-        # Partition count caps useful consumer count — scaling beyond it adds
-        # idle pods. If we are already at the cap, add partitions first.
-        if replicas >= partitions:
+        needed = _size_consumer_group(incident, current)
+
+        # Kafka caps useful consumers at the partition count. If the sized
+        # remedy needs more consumers than there are partitions, raising
+        # partitions is a prerequisite — and issuing both in one plan is what
+        # lets a single incident actually resolve, instead of scaling to the
+        # cap, failing verification, and escalating.
+        if needed > partitions:
+            target_partitions = max(partitions * 2, needed)
             return RemediationPlan(
                 incident_id=incident.incident_id,
-                actions=[Action(
-                    type=ActionType.INCREASE_PARTITIONS, target=svc,
-                    params={"partitions": partitions * 2},
-                    rationale=(
-                        f"{replicas} consumers already match {partitions} "
-                        "partitions, so more consumers would idle. Raising the "
-                        "partition count first is what unlocks more parallelism."
+                actions=[
+                    Action(
+                        type=ActionType.INCREASE_PARTITIONS, target=svc,
+                        params={"partitions": target_partitions},
+                        rationale=(
+                            f"Clearing the backlog needs about {needed} consumers, "
+                            f"but the topic has {partitions} partitions and "
+                            "consumers beyond that sit idle. Raise partitions "
+                            "first to lift the parallelism ceiling."
+                        ),
+                        reversible=False,
                     ),
-                    reversible=False,
-                )],
-                expected_outcome="headroom to add consumers",
+                    Action(
+                        type=ActionType.SCALE_CONSUMER_GROUP, target=svc,
+                        params={"replicas": min(needed, target_partitions)},
+                        rationale=(
+                            f"With {target_partitions} partitions available, raise "
+                            f"consumers from {replicas} to "
+                            f"{min(needed, target_partitions)} — sized from the "
+                            "observed lag growth rate plus 30% headroom so the "
+                            "backlog drains rather than merely stops growing."
+                        ),
+                        reversible=True,
+                    ),
+                ],
+                expected_outcome="consumer lag drains and heap pressure subsides",
                 verification_metric="consumer_lag",
+                verification_window_seconds=30,
             )
-        target = min(replicas * 2, partitions)
+
+        target = max(min(needed, partitions), replicas + 1)
         return RemediationPlan(
             incident_id=incident.incident_id,
             actions=[Action(
                 type=ActionType.SCALE_CONSUMER_GROUP, target=svc,
                 params={"replicas": target},
                 rationale=(
-                    f"Raise consumers from {replicas} to {target} (capped at the "
-                    f"{partitions}-partition limit) so processing rate exceeds "
-                    "arrival rate and the backlog drains."
+                    f"Raise consumers from {replicas} to {target}, sized from the "
+                    "observed lag growth rate plus 30% headroom, so processing "
+                    "rate exceeds arrival rate and the backlog drains."
                 ),
                 reversible=True,
             )],
             expected_outcome="consumer lag drains and heap pressure subsides",
             verification_metric="consumer_lag",
+            verification_window_seconds=30,
         )
 
     if cause == "memory_leak_suspected":
@@ -319,9 +413,12 @@ def plan(
             actions=[Action(
                 type=ActionType.RESTART_SERVICE, target=svc,
                 rationale=(
-                    "Restart reclaims leaked heap. This is blast radius 3, so "
-                    "it parks for human approval rather than auto-executing — "
-                    "correct for an inferred cause with a brief outage cost."
+                    "Heap is growing with no backlog to account for it, so a "
+                    "restart is what reclaims it — adding consumers would not. "
+                    "This is blast radius 3, so it parks for human approval "
+                    "rather than auto-executing, which is right for a cause "
+                    "inferred from absence of evidence and a remedy that costs "
+                    "a brief outage."
                 ),
                 reversible=True,
             )],
@@ -337,12 +434,11 @@ def plan(
                 rationale=(
                     "Latency and errors are elevated but telemetry does not "
                     "identify a constraint to act on. Escalating rather than "
-                    "guessing at a remedy."
+                    "guessing at a remedy on a live system."
                 ),
                 reversible=True,
             )],
             expected_outcome="human operator investigates",
-            verification_metric=None,
         )
 
     return RemediationPlan(

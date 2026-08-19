@@ -160,10 +160,33 @@ Honest status at the time of writing:
 
 **Verified by execution:** the detector's lead times and false-positive rate;
 all 13 Rego policy tests against real OPA; the full loop end-to-end in Docker
-(detect → diagnose → gate → act → verify → close); the human approval gate,
+(detect → diagnose → gate → act → verify → close), including autonomous
+resolution of the OOM and pool-exhaustion scenarios; the human approval gate,
 including that an approval resumes a parked plan; the offline planner on all
 five scenarios against both cluster capability sets; the dashboard against
 live data.
+
+Several bugs were only visible from running the whole system, and are worth
+recording because unit tests could not have caught them:
+
+- The diagnoser initially read only *current* metric values, so a pool
+  predicted to breach in 78 s was still at 44% and classified as
+  unclassifiable. The prediction was correct and then discarded.
+- A no-op plan carries no verification metric, and the "no metric → assume
+  fine" branch sat ahead of the no-op check, so every escalation was scored
+  as a resolved incident.
+- Importing a helper from `services/detector` into the guardian worked on a
+  developer machine and crash-looped in the container. `ops/import_check.py`
+  now reproduces container import paths exactly.
+- Editing `plan()` by text-slice silently deleted two `cause` branches; the
+  agent kept diagnosing correctly and quietly did nothing.
+  `ops/planner_check.py` now asserts the cause→plan mapping is total.
+- The simulation accumulated consumer lag once per tick using a per-second
+  rate, so lag grew at half its stated speed. Any consumer of those metrics
+  that did the arithmetic correctly then under-provisioned.
+- Sizing a consumer group to just above the arrival rate stops a backlog
+  growing but leaves it draining for minutes. Remedies are now sized for a
+  target drain time *and* headroom against a fluctuating arrival rate.
 
 **Not verified by execution:** the LLM planner's live path — no API key was
 available in the build environment. Its budget gating, fallback behaviour,

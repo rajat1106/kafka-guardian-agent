@@ -63,6 +63,11 @@ class SimulatedService:
 
     name: str
     region: str = "us-east-1"
+    # Wall-clock seconds each step() represents. Rates below are per second,
+    # so anything that accumulates over a step must be scaled by this — the
+    # alternative silently makes the simulation's own arithmetic disagree
+    # with any consumer of its metrics.
+    tick_seconds: float = 2.0
     heap_limit_mb: float = 1024.0
     db_pool_size: int = 20
     base_request_rate: float = 120.0
@@ -137,7 +142,7 @@ class SimulatedService:
         capacity = effective_consumers * 95.0 / max(self.faults.consumer_slowdown, 0.01)
         if not self.healthy:
             capacity = 0.0
-        backlog_delta = request_rate - capacity
+        backlog_delta = (request_rate - capacity) * self.tick_seconds
         self.consumer_lag = max(0, int(self.consumer_lag + backlog_delta))
 
         # ── heap ─────────────────────────────────────────────────

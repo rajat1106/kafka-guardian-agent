@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Deque, Iterable
 
 from guardian_platform.contracts import Anomaly, ServiceMetrics, Severity
+from guardian_platform.stats import linear_slope, median as _median, robust_z
 
 # Metrics the detectors watch, with the ceiling each one is racing toward.
 # `None` means the metric has no fixed ceiling and is judged only relative
@@ -42,7 +43,19 @@ WATCHED: dict[str, float | None] = {
 # Below this many samples a series is considered still warming up. Flagging
 # during warm-up is how naive detectors produce a burst of false positives
 # every time the system restarts.
+# Metrics that corroborate a diagnosis but must never open an incident on
+# their own. High CPU with nothing else moving has no actionable remedy —
+# alerting on it produces incidents whose only honest outcome is "no action
+# taken", which trains everyone to ignore the agent. They still feed the
+# multivariate detector and the diagnosis context.
+CORROBORATING_ONLY = {"cpu_pct"}
+
+# Below this many samples a series is considered still warming up.
 MIN_SAMPLES = 12
+# A trend needs more history than a level shift. On a cold start every metric
+# is ramping from zero toward its steady state, and a slope fitted to that
+# ramp extrapolates to a breach that will never happen.
+MIN_SAMPLES_TREND = 30
 WINDOW = 60
 
 
@@ -56,41 +69,6 @@ def _extract(m: ServiceMetrics) -> dict[str, float]:
         "db_pool_utilisation": m.db_pool_utilisation,
         "under_replicated_partitions": float(m.under_replicated_partitions),
     }
-
-
-def _median(xs: list[float]) -> float:
-    if not xs:
-        return 0.0
-    s = sorted(xs)
-    n = len(s)
-    mid = n // 2
-    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
-
-
-def robust_z(window: list[float], value: float) -> float:
-    """Median/MAD z-score. Returns 0 for a degenerate (flat) series."""
-    med = _median(window)
-    mad = _median([abs(x - med) for x in window])
-    if mad < 1e-9:
-        # A perfectly flat series: fall back to a relative-change test so a
-        # jump from 0 to 500 is not silently scored as zero deviation.
-        if abs(med) < 1e-9:
-            return 0.0 if abs(value) < 1e-9 else 6.0
-        return abs(value - med) / abs(med) * 3.0
-    # 0.6745 converts MAD to a stdev-equivalent scale for normal data.
-    return abs(value - med) * 0.6745 / mad
-
-
-def linear_slope(window: list[float]) -> float:
-    """Least-squares slope in units per sample."""
-    n = len(window)
-    if n < 3:
-        return 0.0
-    mean_x = (n - 1) / 2
-    mean_y = sum(window) / n
-    num = sum((i - mean_x) * (y - mean_y) for i, y in enumerate(window))
-    den = sum((i - mean_x) ** 2 for i in range(n))
-    return num / den if den else 0.0
 
 
 @dataclass
@@ -211,6 +189,7 @@ class Detector:
             if len(window) < MIN_SAMPLES:
                 continue
 
+            corroborating = metric in CORROBORATING_ONLY
             ceiling = WATCHED.get(metric)
             baseline = _median(window)
             sigma = robust_z(window, value)
@@ -218,6 +197,8 @@ class Detector:
             anomaly: Anomaly | None = None
 
             # 1. Hard threshold breach — unambiguous, highest confidence.
+            # Applies even to corroborating metrics: CPU actually pegged at
+            # its ceiling is a fact, not an inference.
             if ceiling is not None and value >= ceiling:
                 anomaly = Anomaly(
                     service=m.service, metric=metric, value=value, baseline=baseline,
@@ -229,7 +210,8 @@ class Detector:
                 )
 
             # 2. Predicted breach — the pre-emptive path.
-            elif ceiling is not None and len(window) >= 15:
+            elif (ceiling is not None and not corroborating
+                  and len(window) >= MIN_SAMPLES_TREND):
                 slope = linear_slope(window[-15:])
                 if slope > 1e-6 and value < ceiling:
                     ticks = (ceiling - value) / slope
@@ -254,7 +236,7 @@ class Detector:
                         )
 
             # 3. Level shift.
-            if anomaly is None and sigma >= 4.0:
+            if anomaly is None and sigma >= 4.0 and not corroborating:
                 anomaly = Anomaly(
                     service=m.service, metric=metric, value=value, baseline=baseline,
                     deviation_sigma=round(sigma, 2),
