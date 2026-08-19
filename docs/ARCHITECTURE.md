@@ -187,6 +187,12 @@ recording because unit tests could not have caught them:
 - Sizing a consumer group to just above the arrival rate stops a backlog
   growing but leaves it draining for minutes. Remedies are now sized for a
   target drain time *and* headroom against a fluctuating arrival rate.
+- An incident where no action executed — a plan parked for approval that
+  timed out — still ran verification, saw the injected fault had expired on
+  its own, and recorded a resolution. The agent was taking credit for
+  recoveries it did not cause, which corrupts exactly the statistics it
+  reports about itself. Verification is now gated on at least one action
+  having executed successfully.
 
 **Not verified by execution:** the LLM planner's live path — no API key was
 available in the build environment. Its budget gating, fallback behaviour,

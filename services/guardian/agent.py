@@ -183,11 +183,26 @@ class GuardianAgent:
             await self._emit_decision(incident)
 
             # 5+6. Gate and execute.
-            results = await self._execute_plan(incident, plan, current, done)
+            results: list[ActionResult] = await self._execute_plan(
+                incident, plan, current, done
+            )
 
             # 7. Verify.
             incident.state = IncidentState.VERIFYING
-            verified, detail = await self._verify(incident, plan)
+            executed_any = any(r.executed and r.success for r in results)
+            if not executed_any:
+                # Nothing the agent did took effect, so any recovery is
+                # someone else's — a fault that expired, a human acting out of
+                # band, load subsiding. Reading the metric here and calling it
+                # resolved credits the agent for work it did not do, which
+                # corrupts the very statistics this system reports about
+                # itself.
+                verified, detail = False, (
+                    "no action was executed; not claiming a resolution the "
+                    "agent did not cause"
+                )
+            else:
+                verified, detail = await self._verify(incident, plan)
 
             # 8. Learn.
             incident.state = (IncidentState.RESOLVED if verified
