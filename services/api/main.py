@@ -34,12 +34,20 @@ from guardian_platform.contracts import (  # noqa: E402
 )
 from guardian_platform.kafka import EventConsumer, EventProducer, ensure_topics  # noqa: E402
 from guardian_platform.obs import configure_logging  # noqa: E402
+from guardian_platform.plugins import (  # noqa: E402
+    SLOTS, SlotKind, catalogue, provider as get_provider,
+)
 from guardian_platform.topics import (  # noqa: E402
     GUARDIAN_ACTIONS, GUARDIAN_ANOMALIES, GUARDIAN_APPROVALS,
     GUARDIAN_DECISIONS, GUARDIAN_OUTCOMES, TELEMETRY_METRICS,
 )
 
+import connectors  # noqa: E402
+import demo_control  # noqa: E402
+from plugin_store import PluginStore  # noqa: E402
+
 log = configure_logging("api")
+_store: PluginStore | None = None
 
 FLEET_URL = os.getenv("FLEET_URL", "http://fleet:8081").rstrip("/")
 CHAOS_URL = os.getenv("CHAOS_URL", "http://chaos:8082").rstrip("/")
@@ -415,6 +423,117 @@ async def lineage() -> dict:
     }
 
 
+
+# ── plugins ──────────────────────────────────────────────────────────
+
+def _slot(name: str) -> SlotKind:
+    try:
+        return SlotKind(name)
+    except ValueError:
+        raise HTTPException(404, f"unknown slot {name!r}") from None
+
+
+@app.get("/api/plugins")
+async def plugins() -> dict:
+    """Catalogue plus current state. Secrets are masked by the store."""
+    configured = await _store.public_view() if _store else []
+    return {
+        "catalogue": catalogue(),
+        "configured": configured,
+        "demo": await demo_control.status(),
+    }
+
+
+class PluginConfigBody(BaseModel):
+    provider_id: str
+    config: dict[str, Any] = {}
+
+
+@app.post("/api/plugins/{slot}/configure")
+async def configure_plugin(slot: str, body: PluginConfigBody) -> dict:
+    """Persist configuration. Secrets go in and never come back out."""
+    if _store is None:
+        raise HTTPException(503, "plugin store not ready")
+    slot_enum = _slot(slot)
+    if get_provider(slot_enum, body.provider_id) is None:
+        raise HTTPException(400, f"unknown provider {body.provider_id!r} for {slot}")
+    await _store.save(slot_enum, body.provider_id, body.config)
+    log.info("plugin_configured", slot=slot, provider=body.provider_id,
+             fields=sorted(body.config.keys()))
+    return {"saved": True, "plugins": await _store.public_view()}
+
+
+@app.post("/api/plugins/{slot}/test")
+async def test_plugin(slot: str) -> dict:
+    """Run a real connection test against the saved configuration."""
+    if _store is None:
+        raise HTTPException(503, "plugin store not ready")
+    slot_enum = _slot(slot)
+    entry = await _store.raw(slot_enum)
+    if entry is None:
+        raise HTTPException(404, f"{slot} is not configured")
+
+    tester = connectors.TESTERS[slot_enum]
+    result = await tester(entry["provider_id"], entry["config"])
+    ok = bool(result.pop("ok", False))
+    await _store.record_test(slot_enum, ok, result)
+    log.info("plugin_tested", slot=slot, provider=entry["provider_id"], ok=ok)
+    return {"ok": ok, **result, "plugins": await _store.public_view()}
+
+
+@app.get("/api/plugins/source/discover")
+async def discover_source() -> dict:
+    """Fetch topics, partitions and consumer groups from the live cluster."""
+    if _store is None:
+        raise HTTPException(503, "plugin store not ready")
+    entry = await _store.raw(SlotKind.SOURCE)
+    if entry is None:
+        raise HTTPException(404, "no source configured")
+    return await connectors.discover_kafka(entry["provider_id"], entry["config"])
+
+
+# ── demo cluster lifecycle ───────────────────────────────────────────
+
+@app.get("/api/demo/status")
+async def demo_status() -> dict:
+    return await demo_control.status()
+
+
+@app.post("/api/demo/start")
+async def demo_start() -> dict:
+    return await demo_control.start_cluster()
+
+
+@app.post("/api/demo/stop")
+async def demo_stop() -> dict:
+    return await demo_control.stop_cluster()
+
+
+@app.get("/api/demo/scenarios")
+async def demo_scenarios() -> dict:
+    """Simulated faults plus the container-level ones."""
+    simulated: list = []
+    with contextlib.suppress(Exception):
+        async with httpx.AsyncClient(timeout=8) as c:
+            simulated = (await c.get(f"{CHAOS_URL}/scenarios")).json()["scenarios"]
+    return {
+        "simulated": simulated,
+        "infrastructure": [
+            {"key": k, **v} for k, v in demo_control.INFRA_SCENARIOS.items()
+        ],
+    }
+
+
+@app.post("/api/demo/infra/{key}/inject")
+async def demo_infra_inject(key: str) -> dict:
+    return await demo_control.inject_infra(key)
+
+
+@app.post("/api/demo/infra/{key}/recover")
+async def demo_infra_recover(key: str) -> dict:
+    return await demo_control.recover_infra(key)
+
+
 @app.get("/api/services")
 async def services() -> dict:
     async with httpx.AsyncClient(timeout=8) as c:
@@ -490,6 +609,11 @@ async def startup() -> None:
     log.info("api_starting", kafka=ks.describe())
     await ensure_topics(ks)
     _producer = await EventProducer("api").start()
+
+    global _store
+    _store = PluginStore(app_settings().postgres_dsn)
+    await _store.connect()
+
     app.state.tasks = [
         asyncio.create_task(_pump(TELEMETRY_METRICS, ServiceMetrics, "metrics",
                                   "metrics", _on_metrics)),
@@ -521,6 +645,8 @@ async def shutdown() -> None:
             await task
     if _producer:
         await _producer.stop()
+    if _store:
+        await _store.close()
 
 
 if __name__ == "__main__":

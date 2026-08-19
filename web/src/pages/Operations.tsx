@@ -13,7 +13,6 @@ import {
 import { cn } from "@/lib/utils";
 
 import { MetricCard } from "@/components/MetricCard";
-import { TopicLineage } from "@/components/TopicLineage";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { AgentReasoning } from "@/components/AgentReasoning";
 import { ActionLog } from "@/components/ActionLog";
@@ -28,7 +27,7 @@ const DETECTOR_LABEL: Record<string, string> = {
   threshold: "threshold",
 };
 
-const Index = () => {
+const Operations = () => {
   const { state, cluster, scenarios, connected, error, inject, approve, toggleChaos } =
     useGuardian();
   const [chaosOn, setChaosOn] = useState(true);
@@ -59,15 +58,13 @@ const Index = () => {
   );
 
   return (
-    <div className="min-h-screen bg-background p-4 md:p-6">
+    <div className="p-4 md:p-6">
       <div className="mx-auto max-w-[1600px] space-y-4">
-        {/* header */}
         <div className="flex flex-wrap items-center gap-3">
-          <Bot className="h-7 w-7 text-primary" />
           <div>
-            <h1 className="text-xl font-bold tracking-tight">Kafka Guardian Agent</h1>
+            <h1 className="text-2xl font-bold tracking-tight">Operations</h1>
             <p className="text-xs text-muted-foreground">
-              Autonomous detection, diagnosis and policy-gated remediation
+              Full telemetry, detector output and the action audit trail.
             </p>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -124,9 +121,6 @@ const Index = () => {
             status={state.pending_approvals.length > 0 ? "warning" : "healthy"}
           />
         </div>
-
-        {/* the system, as a graph — the shape of the platform the agent guards */}
-        <TopicLineage height={470} />
 
         <div className="grid gap-4 lg:grid-cols-3">
           {/* left: telemetry */}
@@ -349,4 +343,4 @@ const Index = () => {
   );
 };
 
-export default Index;
+export default Operations;

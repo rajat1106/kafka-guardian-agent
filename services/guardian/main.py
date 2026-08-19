@@ -27,12 +27,14 @@ from budget import TokenBudget  # noqa: E402
 from memory import IncidentMemory  # noqa: E402
 from planner_llm import LLMPlanner  # noqa: E402
 from policy import PolicyGate  # noqa: E402
+from runtime_config import BrainSupervisor  # noqa: E402
 
 log = configure_logging("guardian")
 FLEET_URL = os.getenv("FLEET_URL", "http://fleet:8081").rstrip("/")
 
 app = FastAPI(title="Kafka Guardian Agent", version="2.0.0")
 _agent: GuardianAgent | None = None
+_brain: BrainSupervisor | None = None
 _producer: EventProducer | None = None
 _memory: IncidentMemory | None = None
 
@@ -116,15 +118,13 @@ async def startup() -> None:
         min_severity=gs.llm_min_severity,
     )
 
+    # An env key still works, but the Connections page is the primary path
+    # and can swap the brain at runtime without a restart.
     api_key = aps.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY") or ""
     llm = LLMPlanner(api_key, gs, budget) if api_key.strip() else None
     if llm is None:
         log.info("offline_planner_only",
-                 reason="no ANTHROPIC_API_KEY set — deterministic planner in use")
-    else:
-        log.info("llm_planner_enabled", triage=gs.model_triage,
-                 diagnose=gs.model_diagnose,
-                 budget_per_incident=gs.tokens_per_incident)
+                 reason="no key configured yet — rules engine in use")
 
     actuator = build_actuator(aps.actuator_mode)
     log.info("actuator_ready", backends=actuator.describe())
@@ -141,9 +141,20 @@ async def startup() -> None:
         log.info("found_unfinished_incidents", count=len(unfinished),
                  note="their journaled steps will not be re-executed")
 
+    def _swap_brain(planner, description: str) -> None:
+        """Called by the supervisor whenever stored config changes."""
+        if _agent is not None:
+            _agent._llm = planner  # noqa: SLF001 — the supervisor owns this field
+            _agent.planner_description = description
+
+    global _brain
+    _brain = BrainSupervisor(aps.postgres_dsn, gs, budget, _swap_brain)
+    await _brain.start()
+
     app.state.tasks = [
         asyncio.create_task(_consume_anomalies()),
         asyncio.create_task(_consume_approvals()),
+        asyncio.create_task(_brain.run()),
     ]
 
 
@@ -157,6 +168,8 @@ async def shutdown() -> None:
         await _producer.stop()
     if _memory:
         await _memory.close()
+    if _brain:
+        await _brain.close()
 
 
 if __name__ == "__main__":

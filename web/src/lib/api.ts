@@ -221,6 +221,75 @@ export interface LineageGraph {
   provider?: string;
 }
 
+
+/* ── plugins ─────────────────────────────────────────────────────── */
+
+export interface FieldSpec {
+  name: string;
+  label: string;
+  type: "text" | "password" | "select" | "number" | "boolean" | "textarea";
+  required: boolean;
+  secret: boolean;
+  placeholder: string;
+  help: string;
+  default: string | number | boolean | null;
+  options: { value: string; label: string }[];
+}
+
+export interface ProviderSpec {
+  id: string;
+  slot: string;
+  name: string;
+  summary: string;
+  notes: string;
+  zero_config: boolean;
+  recommended: boolean;
+  fields: FieldSpec[];
+}
+
+export interface SlotSpec {
+  slot: string;
+  title: string;
+  description: string;
+  required: boolean;
+  default: string;
+  providers: ProviderSpec[];
+}
+
+export interface PluginState {
+  slot: string;
+  provider_id: string;
+  status: "unconfigured" | "testing" | "connected" | "error";
+  /** Secrets arrive masked ("••••1234") and are never the real value. */
+  config: Record<string, string | number | boolean>;
+  configured_fields: string[];
+  last_test: Record<string, unknown> | null;
+  updated_at: string | null;
+}
+
+export interface DemoContainer {
+  service: string;
+  name: string;
+  status: string;
+  health: string | null;
+  running: boolean;
+  image: string | null;
+}
+
+export interface PluginsResponse {
+  catalogue: SlotSpec[];
+  configured: PluginState[];
+  demo: {
+    available: boolean;
+    error?: string;
+    containers: DemoContainer[];
+    running: number;
+    total: number;
+    all_up: boolean;
+  };
+  plugins?: PluginState[];
+}
+
 export const emptyState = (): GuardianState => ({
   metrics: {},
   series: {},
@@ -253,6 +322,55 @@ export const api = {
   toggleChaos: async () => {
     const res = await fetch(`${API_URL}/api/chaos/toggle`, { method: "POST" });
     return res.json() as Promise<{ enabled: boolean }>;
+  },
+
+
+  // ── plugins ──────────────────────────────────────────────────────
+  plugins: () => get<PluginsResponse>("/api/plugins"),
+
+  configurePlugin: async (
+    slot: string,
+    providerId: string,
+    config: Record<string, string>,
+  ) => {
+    const res = await fetch(`${API_URL}/api/plugins/${slot}/configure`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: providerId, config }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  },
+
+  testPlugin: async (slot: string) => {
+    const res = await fetch(`${API_URL}/api/plugins/${slot}/test`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json() as Promise<Record<string, unknown>>;
+  },
+
+  discoverSource: () => get<Record<string, unknown>>("/api/plugins/source/discover"),
+
+  // ── demo cluster ─────────────────────────────────────────────────
+  demoScenarios: () => get<{
+    simulated: { key: string; title: string; service: string; description: string }[];
+    infrastructure: { key: string; title: string; description: string; danger: string }[];
+  }>("/api/demo/scenarios"),
+
+  demoStart: async () => {
+    const r = await fetch(`${API_URL}/api/demo/start`, { method: "POST" });
+    return r.json();
+  },
+  demoStop: async () => {
+    const r = await fetch(`${API_URL}/api/demo/stop`, { method: "POST" });
+    return r.json();
+  },
+  injectInfra: async (key: string) => {
+    const r = await fetch(`${API_URL}/api/demo/infra/${key}/inject`, { method: "POST" });
+    return r.json();
+  },
+  recoverInfra: async (key: string) => {
+    const r = await fetch(`${API_URL}/api/demo/infra/${key}/recover`, { method: "POST" });
+    return r.json();
   },
 
   approve: async (incidentId: string, planId: string, approved: boolean) => {

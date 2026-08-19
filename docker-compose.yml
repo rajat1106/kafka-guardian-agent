@@ -134,9 +134,19 @@ services:
       FLEET_URL: http://fleet:8081
       CHAOS_URL: http://chaos:8082
       GUARDIAN_URL: http://guardian:8083
+      DEMO_BOOTSTRAP: kafka:9092
+      POSTGRES_DSN: postgresql://guardian:guardian@postgres:5432/guardian
+      DEMO_CONTAINER_PREFIX: kga-
+    volumes:
+      # Lets the Connections page start/stop the demo cluster and run
+      # container-level chaos (pausing the real broker). Scoped in code to
+      # containers carrying the kga- prefix. Remove this mount if you only
+      # ever point the agent at an external cluster.
+      - /var/run/docker.sock:/var/run/docker.sock
     ports: ["8080:8080"]
     depends_on:
       kafka: {condition: service_healthy}
+      postgres: {condition: service_healthy}
 
   web:
     build: {context: ./web, dockerfile: Dockerfile}

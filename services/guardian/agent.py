@@ -91,6 +91,9 @@ class GuardianAgent:
         self._emit = emit
         self._fleet_state = fleet_state
 
+        # Set by the brain supervisor when configuration changes; shown in
+        # the dashboard so it is always clear what made a decision.
+        self.planner_description = "llm+rules" if llm else "rules engine"
         self._open: dict[str, Incident] = {}          # service -> incident
         # A fault outlives the incident that responds to it. Without a
         # cooldown the same root cause opens a fresh incident every few
@@ -493,5 +496,5 @@ class GuardianAgent:
             "budget": self._budget.snapshot(),
             "capabilities": self.capabilities.model_dump(),
             "kafka": self._kafka.describe(),
-            "planner": "llm+offline" if self._llm else "offline only (no API key)",
+            "planner": self.planner_description,
         }

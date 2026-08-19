@@ -46,6 +46,15 @@ docker compose up --build
 Then open **http://localhost:5173**. Within a couple of minutes the chaos
 engine breaks something and you watch the agent handle it.
 
+Four pages, for two audiences:
+
+| Page | For | Shows |
+|---|---|---|
+| **Overview** | anyone | What the agent did, in sentences. No jargon, no σ. |
+| **Topology** | engineers | Live producer → topic → consumer graph with lag and health. |
+| **Operations** | on-call | Raw telemetry, detector output, full action audit trail. |
+| **Connections** | operators | Plug in your cluster, decision engine and alerting. |
+
 The dashboard leads with a live **topic lineage graph** — producers → topics →
 consumer groups, with real partition counts, replica counts, lag, heap and
 pool pressure on every node. Nodes light up as the agent acts on them, and a
@@ -83,10 +92,41 @@ the topic's partition count, because the surplus consumers would sit idle.
 **Verifies its own work.** After acting it re-reads live metrics and checks
 whether the system actually recovered. A no-op is never recorded as a fix.
 
-## Works against your real cluster
+## Plug in your own everything
 
-The same code targets a self-hosted broker or Confluent Cloud. Set the
-`KAFKA_*` variables in `.env`:
+The **Connections** page configures four independent slots at runtime — no
+restart, no editing `.env`:
+
+| Slot | Options |
+|---|---|
+| **Kafka cluster** | Demo (real broker in Docker) · Self-hosted · Confluent Cloud |
+| **Decision engine** | Built-in rules engine · Claude (choose triage and deep-analysis models) |
+| **Notifications** | Off · Slack · Generic webhook |
+| **Extra signals** | Off · Prometheus |
+
+Every slot has a **Save and test connection** button that performs a real
+operation — a Kafka metadata request, an actual model call, an actual webhook
+POST — and reports what came back. Nothing is marked connected on the strength
+of a well-formed input box.
+
+Two rules the UI enforces:
+
+- **Credentials go in and never come back.** Secrets are stored server-side;
+  reads return `••••1234`. Retype a field to replace it, leave it to keep it.
+- **An untested decision engine is not used.** Configure a Claude key without
+  testing it and the agent stays on the rules engine, saying so. An incident
+  is the wrong moment to discover a key was wrong.
+
+The **demo cluster** is controlled from the same page: *Start cluster* runs the
+actual `docker start`, and alongside the simulated faults there are
+container-level ones — freezing or restarting the real broker process, which
+produces genuine leader elections and client reconnects that no in-process
+simulation can. Container control is scoped in code to the project's own
+`kga-` prefix and to five verbs.
+
+### Configuring the cluster by environment instead
+
+`KAFKA_*` in `.env` still works and takes effect at boot:
 
 ```bash
 KAFKA_PROVIDER=confluent
