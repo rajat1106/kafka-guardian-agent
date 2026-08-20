@@ -7,6 +7,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { AppNav } from "@/components/AppNav";
 import { useGuardian } from "@/hooks/useGuardian";
 import Connections from "./pages/Connections";
+import Incident from "./pages/Incident";
 import NotFound from "./pages/NotFound";
 import Operations from "./pages/Operations";
 import Overview from "./pages/Overview";
@@ -32,6 +33,7 @@ const Shell = () => {
         <Route path="/" element={<Overview />} />
         <Route path="/topology" element={<Topology />} />
         <Route path="/operations" element={<Operations />} />
+        <Route path="/incidents/:id" element={<Incident />} />
         <Route path="/connections" element={<Connections />} />
         <Route path="*" element={<NotFound />} />
       </Routes>

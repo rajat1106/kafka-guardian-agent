@@ -93,6 +93,10 @@ Four pages, for two audiences:
 | **Operations** | on-call | Raw telemetry, detector output, full action audit trail. |
 | **Connections** | operators | Plug in your cluster, decision engine and alerting. |
 
+Every incident has its own URL — `/incidents/<id>` — with the full timeline,
+the exact operation that ran, the policy verdict, and a copy-link button, so
+it can be pasted into an incident channel.
+
 Plus **[Kafka console](http://localhost:8090)** on port 8090 — topics,
 partitions, live message browsing, consumer-group lag. It has
 `DYNAMIC_CONFIG_ENABLED`, so you can add your own cluster (including Confluent
@@ -215,6 +219,36 @@ on both cluster types — `python evals/run_eval.py --provider confluent`.
 Kafka admin actions (partition increases, topic config) are real in every
 mode. Service-level actions run against the demo fleet by default; set
 `ACTUATOR_MODE=k8s` to drive a real Kubernetes cluster instead.
+
+## Running it safely
+
+**Start in shadow mode.** `AUTONOMY_MODE=shadow` runs everything — detection,
+diagnosis, planning, the policy verdict — and gates only the actuator. After a
+few weeks, `/api/shadow/report` answers the question that actually decides
+whether to hand it the keys: *how much of this needed nobody?* Nothing about
+an autonomous remediation system deserves trust before that number exists.
+
+**Authentication.** `AUTH_MODE=local` (username/password, JWTs issued here) or
+`oidc` (validated against your IdP's JWKS). Authorisation is a blast-radius
+ceiling per role on the same 0–5 scale the policy uses: an operator approves
+up to 3, only an approver or admin signs off a region failover. Identity comes
+from the caller's token and never from a request body.
+
+**Audit.** Every approval, configuration change and executed action is
+appended to a hash-chained log in Postgres, with a trigger rejecting UPDATE
+and DELETE. `/api/audit/verify` walks the chain. Anchoring the head externally
+is what would make it tamper-*proof* rather than tamper-*evident*; that step
+is deployment-specific and documented rather than claimed.
+
+**Rollback.** Each action's inverse is computed before it runs, and a failed
+verification triggers the undo — itself policy-gated. Actions with no honest
+inverse say so, which is why the policy treats irreversibility as grounds for
+requiring a human.
+
+**What changed?** `POST /api/changes` accepts deploys and config changes from
+CI. The agent correlates anything in the preceding 30 minutes and offers it as
+a candidate cause — the question a human asks first, and the largest single
+accuracy gain available to the diagnosis step.
 
 ## Token budget
 

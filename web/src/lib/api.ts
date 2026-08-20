@@ -312,6 +312,37 @@ export interface IncidentDetail {
   timeline: TimelineEntry[];
 }
 
+export interface ApprovalContext {
+  incident_id: string;
+  service: string | null;
+  root_cause: string | null;
+  confidence: number | null;
+  reasoning: string;
+  correlated_changes: string[];
+  action_type: string | null;
+  undo: { type: string; params: Record<string, unknown> } | null;
+  time: { seconds_until_breach: number | null; metric: string | null };
+  track_record: { seen: number; resolved: number; rate: number | null };
+  prior_incidents: {
+    incident_id: string; ts: string; resolved: boolean;
+    actions_taken: string[]; mttr_seconds: number;
+    verification_detail: string; human_approved: boolean;
+  }[];
+  if_rejected: string;
+}
+
+export interface ChangeEvent {
+  change_id: string;
+  ts: string;
+  kind: string;
+  service: string;
+  summary: string;
+  reference: string;
+  author: string;
+  version: string;
+  source: string;
+}
+
 export const emptyState = (): GuardianState => ({
   metrics: {},
   series: {},
@@ -355,6 +386,15 @@ export const api = {
   services: () => get<Record<string, unknown>>("/api/services"),
   lineage: () => get<LineageGraph>("/api/lineage"),
   incident: (id: string) => get<IncidentDetail>(`/api/incidents/${id}`),
+  approvalContext: (id: string) =>
+    get<ApprovalContext>(`/api/approvals/${id}/context`),
+  changes: () => get<{ changes: ChangeEvent[] }>("/api/changes"),
+  shadowReport: () => get<{
+    total: number; would_have_auto_executed: number;
+    would_have_needed_a_human: number; automation_rate: number;
+    by_root_cause: Record<string, number>;
+  }>("/api/shadow/report"),
+  autonomy: () => get<{ mode: string; modes: { value: string; label: string; description: string }[] }>("/api/autonomy"),
 
   inject: async (key: string) => {
     const res = await req(`/api/scenarios/${key}/inject`, { method: "POST" });

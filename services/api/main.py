@@ -603,6 +603,99 @@ async def shadow_report() -> dict:
     }
 
 
+
+@app.get("/api/approvals/{incident_id}/context")
+async def approval_context(incident_id: str) -> dict:
+    """Everything a person needs to answer "should I approve this?".
+
+    The card previously showed blast radius and the policy's reasoning, which
+    says what the action *is* but nothing about the decision. The questions
+    someone actually has at 3am are: what happens if I do nothing, how long do
+    I have, what did we do last time, and how often is the agent right about
+    this. All four are derivable from data already held here.
+    """
+    request = P.pending_approvals.get(incident_id)
+    diagnosis = next(
+        (d for d in P.decisions
+         if d.get("incident_id") == incident_id and "root_cause" in d),
+        None,
+    )
+    cause = (diagnosis or {}).get("root_cause")
+
+    # Track record: how often this diagnosis led to a resolved incident.
+    same_cause = [o for o in P.outcomes if o.get("root_cause") == cause]
+    resolved = [o for o in same_cause if o.get("resolved")]
+    prior = [
+        {
+            "incident_id": o.get("incident_id"),
+            "ts": o.get("ts"),
+            "resolved": o.get("resolved"),
+            "actions_taken": o.get("actions_taken", []),
+            "mttr_seconds": o.get("mttr_seconds"),
+            "verification_detail": o.get("verification_detail", ""),
+            "human_approved": o.get("human_approved", False),
+        }
+        for o in same_cause[:5]
+    ]
+
+    # Time remaining, straight from the detector's own projection.
+    # Diagnosis carries no service field — it is keyed by incident — so the
+    # service comes from the action's target or the closing outcome.
+    service = None
+    if request and request.get("actions"):
+        service = request["actions"][0].get("target")
+    if not service:
+        service = next(
+            (o.get("service") for o in P.outcomes
+             if o.get("incident_id") == incident_id), None,
+        )
+    if not service:
+        service = next(
+            (a["action"].get("target") for a in P.actions
+             if a.get("incident_id") == incident_id and a.get("action")), None,
+        )
+    breaches = [
+        a for a in P.anomalies
+        if a.get("service") == service and a.get("predicted_breach_seconds")
+    ]
+    soonest = min((a["predicted_breach_seconds"] for a in breaches), default=None)
+    breach_metric = next(
+        (a["metric"] for a in breaches
+         if a["predicted_breach_seconds"] == soonest), None
+    ) if soonest is not None else None
+
+    # What the agent does if this is rejected: it does not retry, it escalates.
+    action_type = (request["actions"][0]["type"]
+                   if request and request.get("actions") else None)
+    inverse = (request["actions"][0].get("inverse")
+               if request and request.get("actions") else None)
+
+    return {
+        "incident_id": incident_id,
+        "service": service,
+        "root_cause": cause,
+        "confidence": (diagnosis or {}).get("confidence"),
+        "reasoning": (diagnosis or {}).get("reasoning", ""),
+        "correlated_changes": (diagnosis or {}).get("correlated_changes", []),
+        "action_type": action_type,
+        "undo": inverse,
+        "time": {
+            "seconds_until_breach": soonest,
+            "metric": breach_metric,
+        },
+        "track_record": {
+            "seen": len(same_cause),
+            "resolved": len(resolved),
+            "rate": round(len(resolved) / len(same_cause), 2) if same_cause else None,
+        },
+        "prior_incidents": prior,
+        "if_rejected": (
+            "The agent takes no action and the incident is escalated for a "
+            "person to handle. It does not try something smaller on its own."
+        ),
+    }
+
+
 @app.get("/api/cluster")
 async def cluster() -> dict:
     ks = kafka_settings()
