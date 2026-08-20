@@ -10,6 +10,9 @@
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8080";
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8080/ws";
+/** Standard Kafka console (kafbat/kafka-ui) for raw topic and message browsing. */
+export const KAFKA_UI_URL =
+  import.meta.env.VITE_KAFKA_UI_URL ?? "http://localhost:8090";
 
 export type Severity = "info" | "warning" | "critical";
 export type PolicyEffect = "allow" | "require_approval" | "deny";
@@ -319,8 +322,28 @@ export const emptyState = (): GuardianState => ({
   pending_approvals: [],
 });
 
+/**
+ * All requests carry a timeout. Without one, a hung API leaves a button
+ * spinning forever with no way for the user to tell the difference between
+ * "still working" and "never coming back".
+ */
+async function req(path: string, init: RequestInit = {}, timeoutMs = 20_000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(`${API_URL}${path}`, { ...init, signal: ctrl.signal });
+  } catch (e) {
+    if ((e as Error).name === "AbortError") {
+      throw new Error(`Timed out after ${timeoutMs / 1000}s — is the API running?`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`);
+  const res = await req(path);
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -334,13 +357,13 @@ export const api = {
   incident: (id: string) => get<IncidentDetail>(`/api/incidents/${id}`),
 
   inject: async (key: string) => {
-    const res = await fetch(`${API_URL}/api/scenarios/${key}/inject`, { method: "POST" });
+    const res = await req(`/api/scenarios/${key}/inject`, { method: "POST" });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   },
 
   toggleChaos: async () => {
-    const res = await fetch(`${API_URL}/api/chaos/toggle`, { method: "POST" });
+    const res = await req("/api/chaos/toggle", { method: "POST" });
     return res.json() as Promise<{ enabled: boolean }>;
   },
 
@@ -353,7 +376,7 @@ export const api = {
     providerId: string,
     config: Record<string, string>,
   ) => {
-    const res = await fetch(`${API_URL}/api/plugins/${slot}/configure`, {
+    const res = await req(`/api/plugins/${slot}/configure`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider_id: providerId, config }),
@@ -363,7 +386,8 @@ export const api = {
   },
 
   testPlugin: async (slot: string) => {
-    const res = await fetch(`${API_URL}/api/plugins/${slot}/test`, { method: "POST" });
+    // A Kafka connection test can legitimately take 25s before it gives up.
+    const res = await req(`/api/plugins/${slot}/test`, { method: "POST" }, 60_000);
     if (!res.ok) throw new Error(await res.text());
     return res.json() as Promise<Record<string, unknown>>;
   },
@@ -377,28 +401,28 @@ export const api = {
   }>("/api/demo/scenarios"),
 
   demoStart: async () => {
-    const r = await fetch(`${API_URL}/api/demo/start`, { method: "POST" });
+    const r = await req("/api/demo/start", { method: "POST" }, 120_000);
     return r.json();
   },
   demoRecover: async () => {
-    const r = await fetch(`${API_URL}/api/demo/recover`, { method: "POST" });
+    const r = await req("/api/demo/recover", { method: "POST" }, 180_000);
     return r.json();
   },
   demoStop: async () => {
-    const r = await fetch(`${API_URL}/api/demo/stop`, { method: "POST" });
+    const r = await req("/api/demo/stop", { method: "POST" }, 120_000);
     return r.json();
   },
   injectInfra: async (key: string) => {
-    const r = await fetch(`${API_URL}/api/demo/infra/${key}/inject`, { method: "POST" });
+    const r = await req(`/api/demo/infra/${key}/inject`, { method: "POST" }, 60_000);
     return r.json();
   },
   recoverInfra: async (key: string) => {
-    const r = await fetch(`${API_URL}/api/demo/infra/${key}/recover`, { method: "POST" });
+    const r = await req(`/api/demo/infra/${key}/recover`, { method: "POST" }, 60_000);
     return r.json();
   },
 
   approve: async (incidentId: string, planId: string, approved: boolean) => {
-    const res = await fetch(`${API_URL}/api/approve`, {
+    const res = await req("/api/approve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

@@ -11,10 +11,11 @@ import {
 import { cn } from "@/lib/utils";
 import {
   AlertCircle, Boxes, Brain, Bell, CheckCircle2, Container, Gauge, Loader2,
-  LifeBuoy, Play, Plug, Square, Zap,
+  ExternalLink, LifeBuoy, Play, Plug, Square, Zap,
 } from "lucide-react";
 import {
-  api, type PluginState, type PluginsResponse, type SlotSpec, type ProviderSpec,
+  api, KAFKA_UI_URL, type PluginState, type PluginsResponse, type SlotSpec,
+  type ProviderSpec,
 } from "@/lib/api";
 
 const SLOT_ICON: Record<string, typeof Plug> = {
@@ -271,6 +272,10 @@ const SlotCard = ({ spec, current, onSaved }: SlotProps) => {
 
 const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: () => void }) => {
   const [busy, setBusy] = useState<string | null>(null);
+  // Without this, "Start cluster" spins and then silently changes nothing
+  // visible when everything was already running — indistinguishable from a
+  // button that does not work.
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [scenarios, setScenarios] = useState<{
     simulated: { key: string; title: string; service: string; description: string }[];
     infrastructure: { key: string; title: string; description: string; danger: string }[];
@@ -278,9 +283,29 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
 
   useEffect(() => { api.demoScenarios().then(setScenarios).catch(() => undefined); }, []);
 
-  const run = async (label: string, fn: () => Promise<unknown>) => {
+  const run = async (
+    label: string,
+    fn: () => Promise<unknown>,
+    describe?: (r: Record<string, unknown>) => string,
+  ) => {
     setBusy(label);
-    try { await fn(); refresh(); } finally { setBusy(null); }
+    setNote(null);
+    try {
+      const r = (await fn()) as Record<string, unknown>;
+      const steps = (r?.steps ?? []) as { service?: string; verb?: string }[];
+      const changed = steps.filter((x) => x.verb && x.verb !== "none");
+      const text = describe
+        ? describe(r)
+        : changed.length
+          ? `${changed.map((x) => `${x.verb}ed ${x.service}`).join(", ")}.`
+          : "Everything was already running — nothing to change.";
+      setNote({ ok: r?.ok !== false, text });
+      refresh();
+    } catch (e) {
+      setNote({ ok: false, text: String((e as Error).message ?? e) });
+    } finally {
+      setBusy(null);
+    }
   };
 
   if (!demo?.available) {
@@ -320,7 +345,17 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {note && (
+          <div className={cn(
+            "rounded-lg px-3 py-2 text-xs",
+            note.ok ? "bg-emerald-500/10 text-emerald-300"
+                    : "bg-rose-500/10 text-rose-300",
+          )}>
+            {note.text}
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
           {demo.containers.map((c) => (
             <div key={c.name} className="rounded-lg bg-muted/40 px-2.5 py-2">
               <div className="flex items-center gap-1.5">
@@ -355,7 +390,19 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
                              : <Square className="mr-1.5 h-4 w-4" />}
             Stop cluster
           </Button>
+          <Button asChild size="sm" variant="outline">
+            <a href={KAFKA_UI_URL} target="_blank" rel="noreferrer">
+              <ExternalLink className="mr-1.5 h-4 w-4" />
+              Open Kafka console
+            </a>
+          </Button>
         </div>
+        <p className="text-[11px] text-muted-foreground">
+          The Kafka console is a standard cluster browser — every topic,
+          partition, message and consumer group, with no interpretation from
+          the agent. Useful for confirming that what the dashboard claims is
+          actually on the cluster.
+        </p>
 
         {scenarios && (
           <div className="space-y-3">
@@ -368,7 +415,8 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
                   <button
                     key={s.key}
                     disabled={!!busy}
-                    onClick={() => run(s.key, () => api.inject(s.key))}
+                    onClick={() => run(s.key, () => api.inject(s.key),
+                      () => `Injected "${s.title}" into ${s.service}. Watch Overview — the agent should react within ~20s.`)}
                     className="rounded-lg border border-border/50 px-2.5 py-2 text-left transition-colors hover:border-primary/50 hover:bg-muted/40 disabled:opacity-50"
                   >
                     <div className="text-xs font-medium">{s.title}</div>
@@ -404,12 +452,17 @@ const DemoPanel = ({ demo, refresh }: { demo: PluginsResponse["demo"]; refresh: 
                     <div className="mt-1.5 flex gap-1.5">
                       <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]"
                               disabled={!!busy}
-                              onClick={() => run(s.key, () => api.injectInfra(s.key))}>
+                              onClick={() => run(s.key, () => api.injectInfra(s.key),
+                                (r) => r.ok
+                                  ? `${s.title} — container is now "${r.status}". The dashboard will go quiet until you restore.`
+                                  : `Failed: ${r.error}`)}>
                         Break it
                       </Button>
                       <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]"
                               disabled={!!busy}
-                              onClick={() => run(`${s.key}-r`, () => api.recoverInfra(s.key))}>
+                              onClick={() => run(`${s.key}-r`, () => api.recoverInfra(s.key),
+                                (r) => r.ok ? `Restored — container is "${r.status}".`
+                                            : `Failed: ${r.error}`)}>
                         Undo this one
                       </Button>
                     </div>
@@ -430,6 +483,7 @@ const Connections = () => {
   const [data, setData] = useState<PluginsResponse | null>(null);
   const [discovered, setDiscovered] = useState<Record<string, unknown> | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     api.plugins().then(setData).catch(() => undefined);
@@ -444,8 +498,14 @@ const Connections = () => {
 
   const discover = async () => {
     setDiscovering(true);
-    try { setDiscovered(await api.discoverSource()); }
-    finally { setDiscovering(false); }
+    setDiscoverError(null);
+    try {
+      setDiscovered(await api.discoverSource());
+    } catch (e) {
+      setDiscoverError(String((e as Error).message ?? e));
+    } finally {
+      setDiscovering(false);
+    }
   };
 
   const source = byslot["source"];
@@ -478,14 +538,24 @@ const Connections = () => {
                     disabled={discovering || source?.status !== "connected"}
                     onClick={discover}>
               {discovering && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
-              Fetch topics
+              {discovering ? "Reading cluster…" : "Fetch topics"}
             </Button>
           </CardTitle>
           <p className="text-xs text-muted-foreground">
             {source?.status === "connected"
               ? "Reads the live cluster: every topic, its partitions and replication factor."
-              : "Connect a Kafka cluster above first."}
+              : "Connect a Kafka cluster above first — the button is disabled until a source tests successfully."}
           </p>
+          {discoverError && (
+            <p className="rounded bg-rose-500/10 px-2.5 py-1.5 text-xs text-rose-300">
+              {discoverError}
+            </p>
+          )}
+          {!discovered && !discoverError && !discovering && (
+            <p className="text-[11px] text-muted-foreground">
+              Nothing fetched yet. Results appear here.
+            </p>
+          )}
         </CardHeader>
         {discovered && (
           <CardContent>

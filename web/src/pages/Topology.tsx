@@ -1,5 +1,8 @@
 import { TopicLineage } from "@/components/TopicLineage";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ExternalLink } from "lucide-react";
+import { KAFKA_UI_URL } from "@/lib/api";
 
 /**
  * The system as a graph. Given its own page so it gets the full viewport —
@@ -8,13 +11,23 @@ import { Card, CardContent } from "@/components/ui/card";
  */
 const Topology = () => (
   <div className="mx-auto max-w-[1600px] space-y-4 px-4 py-5 md:px-6">
-    <div>
-      <h1 className="text-2xl font-bold tracking-tight">Topology</h1>
-      <p className="mt-0.5 text-sm text-muted-foreground">
-        Every producer, data stream and consumer group, with live throughput and
-        backlog. Nodes change colour as they degrade and show what the agent did
-        to them.
-      </p>
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Topology</h1>
+        <p className="mt-0.5 max-w-3xl text-sm text-muted-foreground">
+          Every producer, data stream and consumer group, with live throughput
+          and backlog. Nodes change colour as they degrade and show what the
+          agent did to them.
+        </p>
+      </div>
+      {/* This view is the agent's interpretation. The console is the cluster
+          itself — worth having one click away so the two can be compared. */}
+      <Button asChild variant="outline" size="sm">
+        <a href={KAFKA_UI_URL} target="_blank" rel="noreferrer">
+          <ExternalLink className="mr-1.5 h-4 w-4" />
+          Browse topics and messages
+        </a>
+      </Button>
     </div>
 
     <TopicLineage height={620} />

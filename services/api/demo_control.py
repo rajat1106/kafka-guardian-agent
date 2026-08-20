@@ -24,7 +24,7 @@ log = structlog.get_logger(__name__)
 
 PROJECT_PREFIX = os.getenv("DEMO_CONTAINER_PREFIX", "kga-")
 # The containers that constitute the demo cluster, in start order.
-DEMO_SERVICES = ["kafka", "fleet", "chaos", "detector"]
+DEMO_SERVICES = ["kafka", "fleet", "chaos", "detector", "kafka-ui"]
 BROKER = "kafka"
 
 _ALLOWED_VERBS = {"start", "stop", "restart", "pause", "unpause"}
@@ -106,15 +106,33 @@ async def act(service: str, verb: str) -> dict[str, Any]:
 
 
 async def start_cluster() -> dict[str, Any]:
-    """Bring the demo cluster up, broker first."""
-    results = []
+    """Bring the demo cluster up, broker first.
+
+    Containers already running are left alone and reported as such. Issuing
+    `start` against a running container succeeds silently, which made the UI
+    claim it had started five containers that were never down.
+    """
+    current = await status()
+    if not current.get("available"):
+        return {"ok": False, "error": current.get("error"), "steps": []}
+    by_service = {c["service"]: c for c in current["containers"]}
+
+    results: list[dict[str, Any]] = []
+    started_broker = False
     for service in DEMO_SERVICES:
+        if by_service.get(service, {}).get("status") == "running":
+            results.append({"ok": True, "service": service, "verb": "none",
+                            "status": "already running"})
+            continue
         results.append(await act(service, "start"))
         if service == BROKER:
-            # The rest are useless until the broker accepts connections.
-            await asyncio.sleep(6)
+            started_broker = True
+            # Dependants fail their own startup if they connect before the
+            # broker is answering.
+            await _await_broker(timeout=45)
+
     return {"ok": all(r["ok"] for r in results), "steps": results,
-            "status": await status()}
+            "started_broker": started_broker, "status": await status()}
 
 
 async def recover_cluster() -> dict[str, Any]:

@@ -148,6 +148,24 @@ services:
       kafka: {condition: service_healthy}
       postgres: {condition: service_healthy}
 
+  # Standard Kafka console for browsing topics, partitions, messages and
+  # consumer groups directly. The Topology page shows the agent's view of the
+  # cluster; this is the cluster itself, with no interpretation layered on it.
+  # DYNAMIC_CONFIG_ENABLED lets you add your own cluster (including Confluent
+  # Cloud) from inside the console without touching this file.
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: kga-kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: demo (kafka-guardian)
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+      SERVER_SERVLET_CONTEXT_PATH: /
+    depends_on:
+      kafka: {condition: service_healthy}
+
   web:
     build: {context: ./web, dockerfile: Dockerfile}
     container_name: kga-web
@@ -155,7 +173,8 @@ services:
     environment:
       VITE_API_URL: http://localhost:8080
       VITE_WS_URL: ws://localhost:8080/ws
-    depends_on: [api]
+      VITE_KAFKA_UI_URL: http://localhost:8090
+    depends_on: [api, kafka-ui]
 
 volumes:
   pgdata:

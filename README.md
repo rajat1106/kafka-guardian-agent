@@ -21,6 +21,11 @@ cd kafka-guardian-agent
 
 Then open **http://localhost:5173**.
 
+A standard Kafka console runs alongside it at **http://localhost:8090** for
+browsing topics, partitions, messages and consumer groups directly — the
+dashboard shows the agent's interpretation of the cluster, the console shows
+the cluster.
+
 `start.sh` starts Docker if it is not running, creates your `.env`, builds the
 stack, waits for it to be ready, and prints the link. First run takes about a
 minute; after that, seconds.
@@ -71,7 +76,12 @@ curl -X POST http://localhost:8080/api/demo/recover
  └─────────────────────────────────────────────────────────────┘
 ```
 
-Then open **http://localhost:5173**. Within a couple of minutes the chaos
+Then open **http://localhost:5173**.
+
+A standard Kafka console runs alongside it at **http://localhost:8090** for
+browsing topics, partitions, messages and consumer groups directly — the
+dashboard shows the agent's interpretation of the cluster, the console shows
+the cluster. Within a couple of minutes the chaos
 engine breaks something and you watch the agent handle it.
 
 Four pages, for two audiences:
@@ -82,6 +92,11 @@ Four pages, for two audiences:
 | **Topology** | engineers | Live producer → topic → consumer graph with lag and health. |
 | **Operations** | on-call | Raw telemetry, detector output, full action audit trail. |
 | **Connections** | operators | Plug in your cluster, decision engine and alerting. |
+
+Plus **[Kafka console](http://localhost:8090)** (kafbat/kafka-ui) on port 8090 —
+topics, partitions, live message browsing, consumer-group lag. It has
+`DYNAMIC_CONFIG_ENABLED`, so you can add your own cluster (including Confluent
+Cloud) from inside the console without editing any file.
 
 The dashboard leads with a live **topic lineage graph** — producers → topics →
 consumer groups, with real partition counts, replica counts, lag, heap and

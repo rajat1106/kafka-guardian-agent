@@ -64,12 +64,14 @@ wait_for() {  # wait_for <label> <url> <seconds>
 
 wait_for "Kafka broker"  "http://localhost:8081/health" 150 || true
 wait_for "Agent API"     "http://localhost:8080/api/health" 90 || true
+wait_for "Kafka console" "http://localhost:8090" 90 || true
 wait_for "Dashboard"     "http://localhost:5173" 90 || true
 
 say ""
 say "${bold}${green}Ready.${reset}"
 say ""
-say "  ${bold}Open  →  http://localhost:5173${reset}"
+say "  ${bold}Dashboard      →  http://localhost:5173${reset}"
+say "  ${bold}Kafka console  →  http://localhost:8090${reset}  ${dim}(browse topics and messages)${reset}"
 say ""
 say "  ${dim}Overview     what the agent has done, in plain English"
 say "  Topology     live map of producers, topics and consumers"
