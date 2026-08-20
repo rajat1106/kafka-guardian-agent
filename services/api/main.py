@@ -35,6 +35,11 @@ from guardian_platform.contracts import (  # noqa: E402
 )
 from guardian_platform.kafka import EventConsumer, EventProducer, ensure_topics  # noqa: E402
 from guardian_platform.audit import AuditEvent, AuditLog  # noqa: E402
+from guardian_platform.envsecrets import promote  # noqa: E402
+
+# Resolve *_FILE secrets before any settings object reads the environment.
+promote("AUTH_JWT_SECRET", "GUARDIAN_SECRET_KEY", "BOOTSTRAP_ADMIN_PASSWORD",
+        "KAFKA_SASL_PASSWORD", "POSTGRES_PASSWORD")
 from guardian_platform.authz import (  # noqa: E402
     CAN_CONFIGURE, CAN_INJECT_CHAOS, CAN_ROLLBACK, Principal, issue_token,
 )

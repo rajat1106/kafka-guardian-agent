@@ -10,6 +10,7 @@ import asyncpg
 import structlog
 from fastapi import Depends, HTTPException, Request
 
+from guardian_platform.envsecrets import promote, read as read_secret
 from guardian_platform.authz import (
     ANONYMOUS, AuthSettings, Principal, Role, hash_password,
     principal_from_local_token, principal_from_oidc_token, verify_password,
@@ -62,9 +63,19 @@ class UserStore:
         """
         assert self._pool is not None
         count = await self._pool.fetchval("SELECT COUNT(*) FROM users")
+        password = read_secret("BOOTSTRAP_ADMIN_PASSWORD").strip()
         if count:
+            # The variable is only consulted when the table is empty. Left set
+            # afterwards it is a standing plaintext copy of a live admin
+            # password, readable from `docker inspect` by anyone in the docker
+            # group. Say so rather than letting it sit there quietly.
+            if password:
+                log.warning(
+                    "bootstrap_password_still_set",
+                    note="users already exist, so BOOTSTRAP_ADMIN_PASSWORD is "
+                         "no longer used. Remove it from your environment — it "
+                         "is readable via `docker inspect`.")
             return
-        password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "").strip()
         if not password:
             log.warning(
                 "no_bootstrap_admin",

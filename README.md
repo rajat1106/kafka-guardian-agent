@@ -236,6 +236,9 @@ ceiling per role on the same 0–5 scale the policy uses: an operator approves
 up to 3, only an approver or admin signs off a region failover. Identity comes
 from the caller's token and never from a request body.
 
+Where every credential lives, in what form, and what it exposes:
+**[docs/SECURITY.md](docs/SECURITY.md)**.
+
 **Audit.** Every approval, configuration change and executed action is
 appended to a hash-chained log in Postgres, with a trigger rejecting UPDATE
 and DELETE. `/api/audit/verify` walks the chain. Anchoring the head externally
