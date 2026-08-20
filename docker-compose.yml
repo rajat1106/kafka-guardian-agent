@@ -137,6 +137,12 @@ services:
       DEMO_BOOTSTRAP: kafka:9092
       POSTGRES_DSN: postgresql://guardian:guardian@postgres:5432/guardian
       DEMO_CONTAINER_PREFIX: kga-
+      AUTH_MODE: ${AUTH_MODE:-disabled}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-}
+      BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      GUARDIAN_SECRET_KEY: ${GUARDIAN_SECRET_KEY:-}
     volumes:
       # Lets the Connections page start/stop the demo cluster and run
       # container-level chaos (pausing the real broker). Scoped in code to

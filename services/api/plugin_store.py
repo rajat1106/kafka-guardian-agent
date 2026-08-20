@@ -4,9 +4,10 @@ Secrets live here and nowhere else that a browser can reach. `public_view()`
 is the only shape ever serialised to the frontend, and it masks every field
 the provider marked secret.
 
-Storage note: values are held as JSON in Postgres. For anything beyond a local
-demo the database should be encrypted at rest and the API should sit behind
-authentication — a plugin store is, by construction, a credential store.
+Storage: secret-marked fields are encrypted before they reach Postgres using
+the configured secrets provider, so a database dump is not a credential dump.
+Non-secret configuration is stored as-is, because encrypting a bootstrap
+server address buys nothing and makes the table unqueryable.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import asyncpg
 import structlog
 
 from guardian_platform.plugins import SLOTS, SlotKind, Status, provider, redact
+from guardian_platform.secrets import build_provider
 
 log = structlog.get_logger(__name__)
 
@@ -38,6 +40,32 @@ class PluginStore:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
         self._pool: asyncpg.Pool | None = None
+        self._secrets = build_provider()
+
+    @property
+    def secrets_backend(self) -> str:
+        return self._secrets.name
+
+    @staticmethod
+    def _secret_fields(slot: SlotKind, provider_id: str) -> set[str]:
+        p = provider(slot, provider_id)
+        return p.secret_fields() if p else set()
+
+    def _encrypt(self, slot: SlotKind, provider_id: str,
+                 config: dict[str, Any]) -> dict[str, Any]:
+        secrets = self._secret_fields(slot, provider_id)
+        return {
+            k: (self._secrets.encrypt(str(v)) if k in secrets and v else v)
+            for k, v in config.items()
+        }
+
+    def _decrypt(self, slot: SlotKind, provider_id: str,
+                 config: dict[str, Any]) -> dict[str, Any]:
+        secrets = self._secret_fields(slot, provider_id)
+        return {
+            k: (self._secrets.decrypt(str(v)) if k in secrets and v else v)
+            for k, v in config.items()
+        }
 
     async def connect(self, retries: int = 30) -> None:
         import asyncio
@@ -90,10 +118,12 @@ class PluginStore:
         )
         if row is None:
             return None
+        stored = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+        slot_enum = SlotKind(row["slot"])
         return {
             "slot": row["slot"],
             "provider_id": row["provider_id"],
-            "config": json.loads(row["config"]) if isinstance(row["config"], str) else row["config"],
+            "config": self._decrypt(slot_enum, row["provider_id"], stored or {}),
             "status": row["status"],
             "last_test": (json.loads(row["last_test"])
                           if isinstance(row["last_test"], str) else row["last_test"]),
@@ -164,7 +194,8 @@ class PluginStore:
                   last_test   = EXCLUDED.last_test,
                   updated_at  = now()
             """,
-            slot.value, provider_id, json.dumps(merged), status,
+            slot.value, provider_id,
+            json.dumps(self._encrypt(slot, provider_id, merged)), status,
             json.dumps(existing["last_test"]) if (same_provider and existing
                                                   and existing["last_test"]) else None,
         )

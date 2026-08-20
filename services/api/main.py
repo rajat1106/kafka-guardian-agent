@@ -22,7 +22,7 @@ from typing import Any, Deque
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -33,6 +33,10 @@ from guardian_platform.contracts import (  # noqa: E402
     ActionResult, Anomaly, ApprovalResponse, ServiceMetrics,
 )
 from guardian_platform.kafka import EventConsumer, EventProducer, ensure_topics  # noqa: E402
+from guardian_platform.audit import AuditEvent, AuditLog  # noqa: E402
+from guardian_platform.authz import (  # noqa: E402
+    CAN_CONFIGURE, CAN_INJECT_CHAOS, CAN_ROLLBACK, Principal, issue_token,
+)
 from guardian_platform.obs import configure_logging  # noqa: E402
 from guardian_platform.plugins import (  # noqa: E402
     SLOTS, SlotKind, catalogue, provider as get_provider,
@@ -44,10 +48,13 @@ from guardian_platform.topics import (  # noqa: E402
 
 import connectors  # noqa: E402
 import demo_control  # noqa: E402
+from auth_dep import UserStore, current_principal, require, settings as auth_settings  # noqa: E402
 from plugin_store import PluginStore  # noqa: E402
 
 log = configure_logging("api")
 _store: PluginStore | None = None
+_users: UserStore | None = None
+_audit: AuditLog | None = None
 
 FLEET_URL = os.getenv("FLEET_URL", "http://fleet:8081").rstrip("/")
 CHAOS_URL = os.getenv("CHAOS_URL", "http://chaos:8082").rstrip("/")
@@ -279,6 +286,120 @@ async def _pump_raw(spec, group: str, kind: str, handler,
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────
+
+# ── authentication ───────────────────────────────────────────────────
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/login")
+async def login(body: LoginBody) -> dict:
+    s = auth_settings()
+    if not s.enabled:
+        raise HTTPException(400, "Authentication is disabled (AUTH_MODE=disabled)")
+    if s.mode == "oidc":
+        raise HTTPException(400, "This deployment uses OIDC; obtain a token from the IdP")
+    if _users is None:
+        raise HTTPException(503, "user store not ready")
+
+    principal = await _users.authenticate(body.username, body.password)
+    if principal is None:
+        if _audit:
+            await _audit.record(AuditEvent.LOGIN_FAILED, actor=body.username,
+                                detail={"reason": "invalid credentials"})
+        # Deliberately does not distinguish unknown user from wrong password.
+        raise HTTPException(401, "Invalid username or password")
+
+    token, expires = issue_token(principal, s.secret)
+    if _audit:
+        await _audit.record(AuditEvent.LOGIN, actor=principal.subject,
+                            actor_name=principal.display_name,
+                            actor_issuer=principal.issuer,
+                            detail={"roles": [r.value for r in principal.roles]})
+    return {"token": token, "expires_at": expires.isoformat(),
+            "principal": principal.to_json()}
+
+
+@app.get("/api/auth/me")
+async def whoami(p: Principal = Depends(current_principal)) -> dict:
+    return {"authenticated": auth_settings().enabled, "mode": auth_settings().mode,
+            "principal": p.to_json()}
+
+
+class CreateUserBody(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+    email: str | None = None
+    roles: list[str] = ["viewer"]
+
+
+@app.get("/api/auth/users")
+async def list_users(p: Principal = Depends(require(CAN_CONFIGURE))) -> dict:
+    if _users is None:
+        raise HTTPException(503, "user store not ready")
+    return {"users": await _users.list_users()}
+
+
+@app.post("/api/auth/users")
+async def create_user(body: CreateUserBody,
+                      p: Principal = Depends(require(CAN_CONFIGURE))) -> dict:
+    from guardian_platform.authz import Role
+
+    if _users is None:
+        raise HTTPException(503, "user store not ready")
+    if len(body.password) < 12:
+        raise HTTPException(400, "Password must be at least 12 characters")
+    try:
+        roles = [Role(r.lower()) for r in body.roles]
+    except ValueError as exc:
+        raise HTTPException(400, f"Unknown role: {exc}") from None
+
+    subject = await _users.create(
+        username=body.username, password=body.password,
+        display_name=body.display_name or body.username,
+        roles=roles, email=body.email,
+    )
+    if _audit:
+        await _audit.record(
+            AuditEvent.PLUGIN_CONFIGURED, actor=p.subject,
+            actor_name=p.display_name, actor_issuer=p.issuer, subject=subject,
+            detail={"created_user": body.username,
+                    "roles": [r.value for r in roles]},
+        )
+    return {"created": True, "subject": subject}
+
+
+@app.get("/api/auth/config")
+async def auth_config() -> dict:
+    """What the login screen needs to know before anyone has a token."""
+    s = auth_settings()
+    return {"mode": s.mode, "enabled": s.enabled,
+            "oidc_issuer": s.oidc_issuer if s.mode == "oidc" else None}
+
+
+# ── audit ────────────────────────────────────────────────────────────
+
+@app.get("/api/audit")
+async def audit_recent(limit: int = 100, event: str | None = None,
+                       subject: str | None = None,
+                       p: Principal = Depends(current_principal)) -> dict:
+    if _audit is None:
+        raise HTTPException(503, "audit log not ready")
+    return {"records": await _audit.recent(limit=limit, event=event, subject=subject),
+            "head": await _audit.head()}
+
+
+@app.get("/api/audit/verify")
+async def audit_verify(p: Principal = Depends(current_principal)) -> dict:
+    """Walk the hash chain and report the first break, if any."""
+    if _audit is None:
+        raise HTTPException(503, "audit log not ready")
+    return await _audit.verify()
+
+
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True, "kafka": kafka_settings().describe()}
@@ -529,7 +650,8 @@ class PluginConfigBody(BaseModel):
 
 
 @app.post("/api/plugins/{slot}/configure")
-async def configure_plugin(slot: str, body: PluginConfigBody) -> dict:
+async def configure_plugin(slot: str, body: PluginConfigBody,
+                           p: Principal = Depends(require(CAN_CONFIGURE))) -> dict:
     """Persist configuration. Secrets go in and never come back out."""
     if _store is None:
         raise HTTPException(503, "plugin store not ready")
@@ -537,13 +659,23 @@ async def configure_plugin(slot: str, body: PluginConfigBody) -> dict:
     if get_provider(slot_enum, body.provider_id) is None:
         raise HTTPException(400, f"unknown provider {body.provider_id!r} for {slot}")
     await _store.save(slot_enum, body.provider_id, body.config)
+    if _audit:
+        # Field names only — never values. An audit record that quotes the
+        # secret it was protecting defeats the purpose.
+        await _audit.record(
+            AuditEvent.PLUGIN_CONFIGURED, actor=p.subject,
+            actor_name=p.display_name, actor_issuer=p.issuer, subject=slot,
+            detail={"provider": body.provider_id,
+                    "fields_set": sorted(body.config.keys())},
+        )
     log.info("plugin_configured", slot=slot, provider=body.provider_id,
-             fields=sorted(body.config.keys()))
+             by=p.subject, fields=sorted(body.config.keys()))
     return {"saved": True, "plugins": await _store.public_view()}
 
 
 @app.post("/api/plugins/{slot}/test")
-async def test_plugin(slot: str) -> dict:
+async def test_plugin(slot: str,
+                      p: Principal = Depends(require(CAN_CONFIGURE))) -> dict:
     """Run a real connection test against the saved configuration."""
     if _store is None:
         raise HTTPException(503, "plugin store not ready")
@@ -556,7 +688,13 @@ async def test_plugin(slot: str) -> dict:
     result = await tester(entry["provider_id"], entry["config"])
     ok = bool(result.pop("ok", False))
     await _store.record_test(slot_enum, ok, result)
-    log.info("plugin_tested", slot=slot, provider=entry["provider_id"], ok=ok)
+    if _audit:
+        await _audit.record(AuditEvent.PLUGIN_TESTED, actor=p.subject,
+                            actor_name=p.display_name, actor_issuer=p.issuer,
+                            subject=slot,
+                            detail={"provider": entry["provider_id"], "ok": ok})
+    log.info("plugin_tested", slot=slot, provider=entry["provider_id"],
+             ok=ok, by=p.subject)
     return {"ok": ok, **result, "plugins": await _store.public_view()}
 
 
@@ -610,8 +748,16 @@ async def demo_scenarios() -> dict:
 
 
 @app.post("/api/demo/infra/{key}/inject")
-async def demo_infra_inject(key: str) -> dict:
-    return await demo_control.inject_infra(key)
+async def demo_infra_inject(
+    key: str, p: Principal = Depends(require(CAN_INJECT_CHAOS))
+) -> dict:
+    result = await demo_control.inject_infra(key)
+    if _audit:
+        await _audit.record(AuditEvent.CHAOS_INJECTED, actor=p.subject,
+                            actor_name=p.display_name, actor_issuer=p.issuer,
+                            subject=key, detail={"kind": "infrastructure",
+                                                 "ok": result.get("ok")})
+    return result
 
 
 @app.post("/api/demo/infra/{key}/recover")
@@ -632,11 +778,17 @@ async def scenarios() -> dict:
 
 
 @app.post("/api/scenarios/{key}/inject")
-async def inject(key: str) -> dict:
+async def inject(key: str,
+                 p: Principal = Depends(require(CAN_INJECT_CHAOS))) -> dict:
     async with httpx.AsyncClient(timeout=10) as c:
         r = await c.post(f"{CHAOS_URL}/inject/{key}")
         if r.status_code >= 400:
             raise HTTPException(r.status_code, r.text)
+        if _audit:
+            await _audit.record(AuditEvent.CHAOS_INJECTED, actor=p.subject,
+                                actor_name=p.display_name,
+                                actor_issuer=p.issuer, subject=key,
+                                detail={"kind": "simulated"})
         return r.json()
 
 
@@ -650,25 +802,60 @@ class ApprovalBody(BaseModel):
     incident_id: str
     plan_id: str = ""
     approved: bool
-    approved_by: str = "operator"
     note: str = ""
+    # `approved_by` is deliberately absent. It used to be accepted here, which
+    # meant the audit record said whatever the client typed. Identity now comes
+    # from the caller's token and nowhere else.
 
 
 @app.post("/api/approve")
-async def approve(body: ApprovalBody) -> dict:
+async def approve(body: ApprovalBody,
+                  p: Principal = Depends(current_principal)) -> dict:
     """Publish a human decision onto the approvals topic."""
     if _producer is None:
         raise HTTPException(503, "producer not ready")
     was_pending = body.incident_id in P.pending_approvals
+
+    # Authorisation is measured on the same 0-5 scale as the remediation
+    # policy: an operator may approve a service restart, only an approver may
+    # sign off on a region failover.
+    pending = P.pending_approvals.get(body.incident_id)
+    blast = 0
+    if pending and pending.get("decisions"):
+        blast = int(pending["decisions"][0].get("blast_radius", 0))
+    if body.approved and auth_settings().enabled and not p.may_approve(blast):
+        if _audit:
+            await _audit.record(
+                AuditEvent.APPROVAL_FORBIDDEN, actor=p.subject,
+                actor_name=p.display_name, actor_issuer=p.issuer,
+                subject=body.incident_id,
+                detail={"blast_radius": blast, "max_allowed": p.max_blast,
+                        "roles": [r.value for r in p.roles]},
+            )
+        raise HTTPException(
+            403,
+            f"This action has blast radius {blast}; your role allows up to "
+            f"{p.max_blast}. Escalate to someone with a wider remit.",
+        )
+
     response = ApprovalResponse(
         incident_id=body.incident_id, plan_id=body.plan_id,
-        approved=body.approved, approved_by=body.approved_by, note=body.note,
+        approved=body.approved, approved_by=p.subject, note=body.note,
     )
+    if _audit:
+        await _audit.record(
+            AuditEvent.APPROVAL_GRANTED if body.approved
+            else AuditEvent.APPROVAL_DENIED,
+            actor=p.subject, actor_name=p.display_name, actor_issuer=p.issuer,
+            subject=body.incident_id,
+            detail={"plan_id": body.plan_id, "blast_radius": blast,
+                    "note": body.note, "was_pending": was_pending},
+        )
     await _producer.send(GUARDIAN_APPROVALS, response, key=body.incident_id)
     P.drop_approval(body.incident_id)
     await HUB.broadcast("approval", response.model_dump(mode="json"))
-    log.info("approval_published", incident=body.incident_id, approved=body.approved,
-             was_pending=was_pending)
+    log.info("approval_published", incident=body.incident_id,
+             approved=body.approved, by=p.subject, was_pending=was_pending)
     return {"published": True, "was_pending": was_pending,
             **response.model_dump(mode="json")}
 
@@ -695,9 +882,27 @@ async def startup() -> None:
     await ensure_topics(ks)
     _producer = await EventProducer("api").start()
 
-    global _store
-    _store = PluginStore(app_settings().postgres_dsn)
+    global _store, _users, _audit
+    dsn = app_settings().postgres_dsn
+
+    problems = auth_settings().validate()
+    if problems:
+        # Refusing to start beats starting with authentication silently off.
+        raise RuntimeError("auth configuration invalid: " + "; ".join(problems))
+
+    _store = PluginStore(dsn)
     await _store.connect()
+    _audit = AuditLog(dsn)
+    await _audit.connect()
+    _users = UserStore(dsn)
+    await _users.connect()
+
+    if auth_settings().enabled:
+        log.info("auth_enabled", mode=auth_settings().mode)
+    else:
+        log.warning("auth_disabled",
+                    note="every endpoint is unauthenticated — set AUTH_MODE "
+                         "before exposing this beyond localhost")
 
     app.state.tasks = [
         asyncio.create_task(_pump(TELEMETRY_METRICS, ServiceMetrics, "metrics",
@@ -732,6 +937,10 @@ async def shutdown() -> None:
         await _producer.stop()
     if _store:
         await _store.close()
+    if _users:
+        await _users.close()
+    if _audit:
+        await _audit.close()
 
 
 if __name__ == "__main__":
