@@ -93,10 +93,33 @@ Four pages, for two audiences:
 | **Operations** | on-call | Raw telemetry, detector output, full action audit trail. |
 | **Connections** | operators | Plug in your cluster, decision engine and alerting. |
 
-Plus **[Kafka console](http://localhost:8090)** (kafbat/kafka-ui) on port 8090 —
-topics, partitions, live message browsing, consumer-group lag. It has
+Plus **[Kafka console](http://localhost:8090)** on port 8090 — topics,
+partitions, live message browsing, consumer-group lag. It has
 `DYNAMIC_CONFIG_ENABLED`, so you can add your own cluster (including Confluent
 Cloud) from inside the console without editing any file.
+
+<details>
+<summary>Why this console and not Confluent's?</summary>
+
+Confluent's only self-hostable UI is **Control Center**, which is an
+Enterprise component: it runs unlicensed for 30 days and then needs a licence
+key. Confluent's free console is part of Confluent Cloud and cannot be pointed
+at your own broker. So there is no free, self-hosted, official Confluent UI to
+use.
+
+Among the genuinely open-source options:
+
+| Console | Licence | Notes |
+|---|---|---|
+| **kafbat/kafka-ui** *(used here)* | Apache 2.0 | Community successor to the archived `provectuslabs/kafka-ui`. The most feature-complete free option. |
+| AKHQ | Apache 2.0 | Comparable and widely deployed; a fine swap if you prefer it. |
+| Kafdrop | Apache 2.0 | Lightest — runs in ~64 MB — but no authentication. |
+| Redpanda Console | BSL (source-available) | Not open source, and RBAC/SSO need a paid licence. |
+
+To swap it, change the `kafka-ui` service image in `docker-compose.yml`;
+nothing else in the stack depends on it.
+
+</details>
 
 The dashboard leads with a live **topic lineage graph** — producers → topics →
 consumer groups, with real partition counts, replica counts, lag, heap and

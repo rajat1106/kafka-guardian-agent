@@ -4,6 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+
 bold=$'\033[1m'; dim=$'\033[2m'; green=$'\033[32m'; red=$'\033[31m'
 yellow=$'\033[33m'; reset=$'\033[0m'
 
