@@ -28,11 +28,13 @@ from guardian_platform.config import (
     AppSettings, ClusterCapabilities, GuardianSettings, KafkaSettings,
 )
 from guardian_platform.contracts import (
-    Action, ActionResult, ActionType, Anomaly, ApprovalRequest, Diagnosis,
-    Incident, IncidentState, Outcome, RemediationPlan, Severity,
+    Action, ActionResult, ActionType, Anomaly, ApprovalRequest, AutonomyMode,
+    Diagnosis, Incident, IncidentState, Outcome, RemediationPlan, Severity,
+    ShadowRecord,
 )
 
 import planner_offline
+import rollback
 from actuators import CompositeActuator
 from budget import TokenBudget
 from memory import IncidentMemory
@@ -79,6 +81,8 @@ class GuardianAgent:
         llm: LLMPlanner | None,
         emit,          # async callable(topic_spec, model, key) -> None
         fleet_state,   # async callable(service) -> dict
+        autonomy: AutonomyMode = AutonomyMode.SUPERVISED,
+        changes=None,   # ChangeTracker | None
     ) -> None:
         self._kafka = kafka
         self._s = guardian
@@ -94,6 +98,8 @@ class GuardianAgent:
         # Set by the brain supervisor when configuration changes; shown in
         # the dashboard so it is always clear what made a decision.
         self.planner_description = "llm+rules" if llm else "rules engine"
+        self.autonomy = autonomy
+        self._changes = changes
         self._open: dict[str, Incident] = {}          # service -> incident
         # A fault outlives the incident that responds to it. Without a
         # cooldown the same root cause opens a fresh incident every few
@@ -172,8 +178,22 @@ class GuardianAgent:
                 log.info("recalled_incidents", incident=incident.incident_id,
                          count=len(similar))
 
+            # What changed? The first question a human asks, and until now
+            # the one the agent could not.
+            change_lines: list[str] = []
+            if self._changes is not None:
+                change_lines = self._changes.describe(
+                    incident.service, incident.opened_at
+                )
+                if change_lines:
+                    log.info("changes_correlated", incident=incident.incident_id,
+                             count=len(change_lines), first=change_lines[0][:90])
+
             # 3+4. Diagnose and plan.
-            diagnosis, plan = await self._diagnose(incident, current, similar)
+            diagnosis, plan = await self._diagnose(
+                incident, current, similar, change_lines
+            )
+            diagnosis.correlated_changes = change_lines
             incident.diagnosis = diagnosis
             incident.plan = plan
             incident.state = IncidentState.PLANNING
@@ -193,7 +213,11 @@ class GuardianAgent:
             # 7. Verify.
             incident.state = IncidentState.VERIFYING
             executed_any = any(r.executed and r.success for r in results)
-            if not executed_any:
+            if self.autonomy is AutonomyMode.SHADOW:
+                verified, detail = False, (
+                    "shadow mode — the plan was evaluated but not executed"
+                )
+            elif not executed_any:
                 # Nothing the agent did took effect, so any recovery is
                 # someone else's — a fault that expired, a human acting out of
                 # band, load subsiding. Reading the metric here and calling it
@@ -207,11 +231,18 @@ class GuardianAgent:
             else:
                 verified, detail = await self._verify(incident, plan)
 
+            # Undo on failure. An action that did not help is not neutral —
+            # it left the system in a state nobody chose.
+            rolled_back = False
+            if not verified and self.autonomy is not AutonomyMode.SHADOW:
+                rolled_back = await self._rollback(incident, results, current)
+
             # 8. Learn.
             incident.state = (IncidentState.RESOLVED if verified
                               else IncidentState.ESCALATED)
             incident.closed_at = datetime.now(timezone.utc)
-            await self._close(incident, results, verified, detail)
+            await self._close(incident, results, verified, detail,
+                              rolled_back=rolled_back)
 
         except Exception as exc:  # noqa: BLE001 — one bad incident must not stop the agent
             log.exception("incident_failed", incident=incident.incident_id, error=str(exc))
@@ -243,7 +274,8 @@ class GuardianAgent:
         return rates
 
     async def _diagnose(
-        self, incident: Incident, current: dict, similar: list[dict]
+        self, incident: Incident, current: dict, similar: list[dict],
+        change_lines: list[str] | None = None,
     ) -> tuple[Diagnosis, RemediationPlan]:
         """LLM path when it clears the budget gate; deterministic otherwise."""
         peak_score = max((a.score for a in incident.anomalies), default=0.0)
@@ -252,7 +284,8 @@ class GuardianAgent:
         )
 
         if self._llm is not None and status.allowed:
-            result = await self._llm.run(incident, current, self.capabilities, similar)
+            result = await self._llm.run(incident, current, self.capabilities,
+                                         similar, change_lines or [])
             if result is not None:
                 return result
             log.info("llm_fell_back", incident=incident.incident_id)
@@ -260,8 +293,12 @@ class GuardianAgent:
             log.info("llm_skipped", incident=incident.incident_id,
                      verdict=status.verdict, detail=status.detail)
 
-        diagnosis = planner_offline.diagnose(incident, current, self.capabilities)
-        return diagnosis, planner_offline.plan(incident, diagnosis, current, self.capabilities)
+        diagnosis = planner_offline.diagnose(
+            incident, current, self.capabilities, change_lines
+        )
+        return diagnosis, planner_offline.plan(
+            incident, diagnosis, current, self.capabilities
+        )
 
     async def _execute_plan(
         self, incident: Incident, plan: RemediationPlan, current: dict, done: set[str]
@@ -291,6 +328,33 @@ class GuardianAgent:
                     detail="; ".join(decision.reasons) or "denied by policy",
                 ))
                 await self._emit_action(results[-1])
+                continue
+
+            # Compute the undo before acting: the state it depends on stops
+            # existing the moment the action lands.
+            action.inverse = rollback.inverse_of(action, current)
+
+            if self.autonomy is AutonomyMode.SHADOW:
+                # Gate before the approval wait, not after. Everything above
+                # ran for real — detection, diagnosis, planning, the policy
+                # verdict — but shadow mode must never block on a human, or a
+                # silent evaluation run turns into a queue of approval requests
+                # nobody asked for and the record stalls at the first
+                # high-blast action.
+                await self._record_shadow(incident, action, decision)
+                results.append(ActionResult(
+                    incident_id=incident.incident_id, action=action,
+                    decision=decision, executed=False, success=False,
+                    shadowed=True,
+                    detail=(f"shadow mode: would have run {action.type.value} "
+                            f"on {action.target}"
+                            + ("" if decision.effect == "allow"
+                               else " after human approval")),
+                ))
+                await self._emit_action(results[-1])
+                log.info("shadow_action", incident=incident.incident_id,
+                         action=action.type.value,
+                         would_auto_execute=decision.effect == "allow")
                 continue
 
             approved_by_human = False
@@ -442,6 +506,73 @@ class GuardianAgent:
         value = latest.get(metric)
         return float(value) if value is not None else None
 
+    async def _record_shadow(
+        self, incident: Incident, action: Action, decision
+    ) -> None:
+        from guardian_platform.topics import GUARDIAN_DECISIONS
+
+        diagnosis = incident.diagnosis
+        record = ShadowRecord(
+            incident_id=incident.incident_id,
+            service=incident.service,
+            root_cause=diagnosis.root_cause if diagnosis else "undiagnosed",
+            confidence=diagnosis.confidence if diagnosis else 0.0,
+            action_type=action.type.value,
+            action_params=action.params,
+            blast_radius=decision.blast_radius,
+            policy_effect=decision.effect,
+            would_have_auto_executed=decision.effect == "allow",
+            reasoning=action.rationale,
+        )
+        await self._emit(GUARDIAN_DECISIONS, record, incident.incident_id)
+
+    async def _rollback(
+        self, incident: Incident, results: list[ActionResult], current: dict
+    ) -> bool:
+        """Undo actions that ran but did not help, newest first."""
+        any_rolled = False
+        for result in reversed(results):
+            if not (result.executed and result.success):
+                continue
+            inverse = result.action.inverse
+            if inverse is None:
+                result.rollback_detail = (
+                    f"{result.action.type.value} has no automatic undo; "
+                    "manual intervention may be required"
+                )
+                log.info("rollback_unavailable", incident=incident.incident_id,
+                         action=result.action.type.value)
+                continue
+
+            # The undo is an action like any other and is gated like one. An
+            # agent that can bypass policy on the way back has no policy.
+            decision = await self._policy.evaluate(
+                action=inverse, capabilities=self.capabilities,
+                diagnosis=incident.diagnosis, current_state=current,
+                failed_action_count=0,
+            )
+            if decision.effect == "deny":
+                result.rollback_detail = (
+                    f"undo refused by policy: {'; '.join(decision.reasons)}"
+                )
+                continue
+            if decision.effect == "require_approval":
+                result.rollback_detail = (
+                    "undo needs human approval; left in place for an operator"
+                )
+                continue
+
+            outcome = await self._actuator.execute(inverse)
+            result.rolled_back = outcome.success
+            result.rollback_detail = outcome.detail
+            any_rolled = any_rolled or outcome.success
+            log.info("rolled_back", incident=incident.incident_id,
+                     action=result.action.type.value,
+                     inverse=inverse.type.value, success=outcome.success,
+                     detail=outcome.detail)
+            await self._emit_action(result)
+        return any_rolled
+
     # ── emission & persistence ───────────────────────────────────────
     async def _journal(self, incident: Incident, step: str, payload: dict) -> None:
         await self._memory.record_step(incident.incident_id, step, payload)
@@ -457,7 +588,7 @@ class GuardianAgent:
 
     async def _close(
         self, incident: Incident, results: list[ActionResult],
-        verified: bool, detail: str,
+        verified: bool, detail: str, rolled_back: bool = False,
     ) -> None:
         from guardian_platform.topics import GUARDIAN_OUTCOMES
 
@@ -476,6 +607,8 @@ class GuardianAgent:
                 r.decision.effect == "require_approval" and r.executed for r in results
             ),
             scenario=incident.scenario,
+            autonomy_mode=self.autonomy.value,
+            rolled_back=rolled_back,
         )
         await self._memory.close_incident(incident, outcome)
         await self._emit(GUARDIAN_OUTCOMES, outcome, incident.incident_id)
@@ -497,4 +630,6 @@ class GuardianAgent:
             "capabilities": self.capabilities.model_dump(),
             "kafka": self._kafka.describe(),
             "planner": self.planner_description,
+            "autonomy": self.autonomy.value,
+            "changes_tracked": self._changes.count if self._changes else 0,
         }

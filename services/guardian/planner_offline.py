@@ -127,11 +127,17 @@ def _has(incident: Incident, metric: str) -> bool:
     return any(a.metric == metric for a in incident.anomalies)
 
 
-def diagnose(incident: Incident, current: dict, caps: ClusterCapabilities) -> Diagnosis:
+def diagnose(incident: Incident, current: dict, caps: ClusterCapabilities,
+             changes: list[str] | None = None) -> Diagnosis:
     m = _metrics(incident)
     breach = _breaching(incident)
     evidence = [f"{a.metric}={a.value:.2f} ({a.detector}): {a.description}"
                 for a in incident.anomalies[-6:]]
+    # A change just before onset is evidence in its own right, and the rules
+    # engine should surface it even though it cannot reason about it the way
+    # a model can.
+    if changes:
+        evidence = [f"recent change — {c}" for c in changes[:3]] + evidence
 
     # Order matters: the most specific and most consequential first.
     if _has(incident, "healthy"):

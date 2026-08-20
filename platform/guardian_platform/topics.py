@@ -31,6 +31,10 @@ TELEMETRY_EVENTS = TopicSpec(
     "telemetry.events", partitions=3,
     description="Discrete lifecycle events: deploys, restarts, chaos injections.",
 )
+TELEMETRY_CHANGES = TopicSpec(
+    "telemetry.changes", partitions=3, retention_ms=7 * 24 * 60 * 60 * 1000,
+    description="Deploys, config changes and scaling events, for correlation.",
+)
 GUARDIAN_ANOMALIES = TopicSpec(
     "guardian.anomalies", partitions=3,
     description="Detector output. The agent's only wake-up signal.",
@@ -55,6 +59,7 @@ GUARDIAN_OUTCOMES = TopicSpec(
 ALL_TOPICS: tuple[TopicSpec, ...] = (
     TELEMETRY_METRICS,
     TELEMETRY_EVENTS,
+    TELEMETRY_CHANGES,
     GUARDIAN_ANOMALIES,
     GUARDIAN_DECISIONS,
     GUARDIAN_ACTIONS,

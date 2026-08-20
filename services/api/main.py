@@ -30,7 +30,8 @@ sys.path.insert(0, "/app/platform")
 
 from guardian_platform.config import app_settings, kafka_settings  # noqa: E402
 from guardian_platform.contracts import (  # noqa: E402
-    ActionResult, Anomaly, ApprovalResponse, ServiceMetrics,
+    ActionResult, Anomaly, ApprovalResponse, ChangeEvent, ChangeKind,
+    ServiceMetrics,
 )
 from guardian_platform.kafka import EventConsumer, EventProducer, ensure_topics  # noqa: E402
 from guardian_platform.audit import AuditEvent, AuditLog  # noqa: E402
@@ -43,7 +44,8 @@ from guardian_platform.plugins import (  # noqa: E402
 )
 from guardian_platform.topics import (  # noqa: E402
     GUARDIAN_ACTIONS, GUARDIAN_ANOMALIES, GUARDIAN_APPROVALS,
-    GUARDIAN_DECISIONS, GUARDIAN_OUTCOMES, TELEMETRY_METRICS,
+    GUARDIAN_DECISIONS, GUARDIAN_OUTCOMES, TELEMETRY_CHANGES,
+    TELEMETRY_METRICS,
 )
 
 import connectors  # noqa: E402
@@ -104,6 +106,8 @@ class Projection:
         # nothing when clicked is worse than no card at all.
         self.pending_approvals: dict[str, dict] = {}
         self._approval_deadlines: dict[str, float] = {}
+        self.changes: Deque[dict] = deque(maxlen=100)
+        self.shadow: Deque[dict] = deque(maxlen=200)
 
     def add_metrics(self, m: ServiceMetrics) -> dict:
         payload = m.model_dump(mode="json")
@@ -147,6 +151,8 @@ class Projection:
             "actions": list(self.actions),
             "outcomes": list(self.outcomes),
             "pending_approvals": list(self.pending_approvals.values()),
+            "changes": list(self.changes),
+            "shadow": list(self.shadow),
         }
 
 
@@ -227,6 +233,11 @@ def _on_anomaly(a: Anomaly) -> dict:
 
 
 def _on_decision(raw: dict) -> dict:
+    # The decisions topic carries diagnoses, approval requests and shadow
+    # records; each is identified by the fields only it has.
+    if "would_have_auto_executed" in raw:
+        P.shadow.appendleft(raw)
+        return raw
     P.decisions.appendleft(raw)
     # An ApprovalRequest is distinguishable by carrying a plan and decisions.
     if "plan_id" in raw and "decisions" in raw:
@@ -236,6 +247,12 @@ def _on_decision(raw: dict) -> dict:
         if _age_seconds(raw.get("requested_at")) < APPROVAL_TTL_SECONDS:
             P.add_approval(raw)
     return raw
+
+
+def _on_change(e: ChangeEvent) -> dict:
+    payload = e.model_dump(mode="json")
+    P.changes.appendleft(payload)
+    return payload
 
 
 def _on_action(r: ActionResult) -> dict:
@@ -486,6 +503,103 @@ async def incident_detail(incident_id: str) -> dict:
         "actions": sorted(actions, key=lambda x: x.get("ts", "")),
         "anomalies": window,
         "timeline": timeline,
+    }
+
+
+
+# ── change feed ──────────────────────────────────────────────────────
+
+class ChangeBody(BaseModel):
+    """What a CI/CD pipeline posts when it ships something."""
+
+    kind: str = "deploy"
+    service: str
+    summary: str
+    reference: str = ""
+    author: str = ""
+    version: str = ""
+    metadata: dict[str, Any] = {}
+
+
+@app.post("/api/changes")
+async def post_change(body: ChangeBody,
+                      p: Principal = Depends(current_principal)) -> dict:
+    """Record a deploy, config change or scaling event.
+
+    Point your pipeline at this after a successful deploy. The agent keeps a
+    30-minute window and offers anything in it as a candidate cause, which is
+    the difference between "lag is high" and "lag rose 90 seconds after
+    deploy a3f2c1".
+    """
+    if _producer is None:
+        raise HTTPException(503, "producer not ready")
+    try:
+        kind = ChangeKind(body.kind.lower())
+    except ValueError:
+        raise HTTPException(
+            400, f"kind must be one of: {', '.join(k.value for k in ChangeKind)}"
+        ) from None
+
+    event = ChangeEvent(
+        kind=kind, service=body.service, summary=body.summary,
+        reference=body.reference, author=body.author or p.subject,
+        version=body.version, source="api", metadata=body.metadata,
+    )
+    await _producer.send(TELEMETRY_CHANGES, event, key=body.service)
+    P.changes.appendleft(event.model_dump(mode="json"))
+    await HUB.broadcast("change", event.model_dump(mode="json"))
+    log.info("change_recorded", kind=kind.value, service=body.service,
+             reference=body.reference, by=p.subject)
+    return {"recorded": True, "change_id": event.change_id}
+
+
+@app.get("/api/changes")
+async def list_changes() -> dict:
+    return {"changes": list(P.changes)}
+
+
+# ── autonomy ─────────────────────────────────────────────────────────
+
+@app.get("/api/autonomy")
+async def get_autonomy() -> dict:
+    guardian: dict = {}
+    with contextlib.suppress(Exception):
+        async with httpx.AsyncClient(timeout=5) as c:
+            guardian = (await c.get(f"{GUARDIAN_URL}/health")).json()
+    return {
+        "mode": guardian.get("autonomy", "unknown"),
+        "modes": [
+            {"value": "shadow", "label": "Shadow",
+             "description": "Decide everything, execute nothing. Builds a "
+                            "record of what the agent would have done."},
+            {"value": "supervised", "label": "Supervised",
+             "description": "Execute low-blast-radius actions; everything "
+                            "wider waits for a human."},
+            {"value": "autonomous", "label": "Autonomous",
+             "description": "As supervised, with a wider unattended ceiling."},
+        ],
+    }
+
+
+@app.get("/api/shadow/report")
+async def shadow_report() -> dict:
+    """What the agent would have done, and how much of it needed nobody.
+
+    The number that matters when deciding whether to leave shadow mode.
+    """
+    records = list(P.shadow)
+    auto = [r for r in records if r.get("would_have_auto_executed")]
+    by_cause: dict[str, int] = {}
+    for r in records:
+        by_cause[r.get("root_cause", "unknown")] = by_cause.get(
+            r.get("root_cause", "unknown"), 0) + 1
+    return {
+        "total": len(records),
+        "would_have_auto_executed": len(auto),
+        "would_have_needed_a_human": len(records) - len(auto),
+        "automation_rate": round(len(auto) / len(records), 3) if records else 0.0,
+        "by_root_cause": by_cause,
+        "records": records[:60],
     }
 
 
@@ -909,6 +1023,8 @@ async def startup() -> None:
                                   "metrics", _on_metrics)),
         asyncio.create_task(_pump(GUARDIAN_ANOMALIES, Anomaly, "anomalies",
                                   "anomaly", _on_anomaly, replay=True)),
+        asyncio.create_task(_pump(TELEMETRY_CHANGES, ChangeEvent, "changes",
+                                  "change", _on_change, replay=True)),
         asyncio.create_task(_pump(GUARDIAN_ACTIONS, ActionResult, "actions",
                                   "action", _on_action, replay=True)),
         asyncio.create_task(_pump_raw(GUARDIAN_DECISIONS, "decisions",

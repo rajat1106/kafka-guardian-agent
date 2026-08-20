@@ -106,6 +106,7 @@ services:
       POSTGRES_DSN: postgresql://guardian:guardian@postgres:5432/guardian
       OPA_URL: http://opa:8181
       FLEET_URL: http://fleet:8081
+      AUTONOMY_MODE: ${AUTONOMY_MODE:-supervised}
     ports: ["8083:8083"]
     depends_on:
       kafka: {condition: service_healthy}

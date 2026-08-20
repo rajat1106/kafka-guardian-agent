@@ -16,14 +16,19 @@ sys.path.insert(0, "/app/platform")
 from guardian_platform.config import (  # noqa: E402
     app_settings, guardian_settings, kafka_settings,
 )
-from guardian_platform.contracts import Anomaly, ApprovalResponse  # noqa: E402
+from guardian_platform.contracts import (  # noqa: E402
+    Anomaly, ApprovalResponse, AutonomyMode, ChangeEvent,
+)
 from guardian_platform.kafka import EventConsumer, EventProducer, ensure_topics  # noqa: E402
 from guardian_platform.obs import configure_logging  # noqa: E402
-from guardian_platform.topics import GUARDIAN_ANOMALIES, GUARDIAN_APPROVALS  # noqa: E402
+from guardian_platform.topics import (  # noqa: E402
+    GUARDIAN_ANOMALIES, GUARDIAN_APPROVALS, TELEMETRY_CHANGES,
+)
 
 from actuators import build_actuator  # noqa: E402
 from agent import GuardianAgent  # noqa: E402
 from budget import TokenBudget  # noqa: E402
+from changes import ChangeTracker  # noqa: E402
 from memory import IncidentMemory  # noqa: E402
 from planner_llm import LLMPlanner  # noqa: E402
 from policy import PolicyGate  # noqa: E402
@@ -35,6 +40,7 @@ FLEET_URL = os.getenv("FLEET_URL", "http://fleet:8081").rstrip("/")
 app = FastAPI(title="Kafka Guardian Agent", version="2.0.0")
 _agent: GuardianAgent | None = None
 _brain: BrainSupervisor | None = None
+_changes = ChangeTracker()
 _producer: EventProducer | None = None
 _memory: IncidentMemory | None = None
 
@@ -64,6 +70,18 @@ async def _consume_anomalies() -> None:
         async for anomaly in consumer:
             if _agent is not None:
                 await _agent.on_anomaly(anomaly)
+    finally:
+        await consumer.stop()
+
+
+async def _consume_changes() -> None:
+    group = f"guardian-changes-{os.getpid()}"
+    consumer = EventConsumer([TELEMETRY_CHANGES], group, ChangeEvent)
+    await consumer.start()
+    log.info("consuming_changes")
+    try:
+        async for event in consumer:
+            _changes.record(event)
     finally:
         await consumer.stop()
 
@@ -129,11 +147,17 @@ async def startup() -> None:
     actuator = build_actuator(aps.actuator_mode)
     log.info("actuator_ready", backends=actuator.describe())
 
+    autonomy = AutonomyMode(os.getenv("AUTONOMY_MODE", "supervised").lower())
+    log.info("autonomy_mode", mode=autonomy.value,
+             note=("decisions are recorded but nothing is executed"
+                   if autonomy is AutonomyMode.SHADOW else "actions execute"))
+
     _agent = GuardianAgent(
         kafka=ks, guardian=gs, app=aps, memory=_memory,
         policy=PolicyGate(aps.opa_url, gs.auto_approve_max_blast),
         actuator=actuator, budget=budget, llm=llm,
-        emit=_emit, fleet_state=_fleet_state,
+        emit=_emit, fleet_state=_fleet_state, autonomy=autonomy,
+        changes=_changes,
     )
 
     unfinished = await _memory.unfinished_incidents()
@@ -154,6 +178,7 @@ async def startup() -> None:
     app.state.tasks = [
         asyncio.create_task(_consume_anomalies()),
         asyncio.create_task(_consume_approvals()),
+        asyncio.create_task(_consume_changes()),
         asyncio.create_task(_brain.run()),
     ]
 

@@ -66,6 +66,37 @@ class ServiceMetrics(BaseModel):
         return self.db_pool_used / max(self.db_pool_size, 1)
 
 
+class ChangeKind(str, Enum):
+    DEPLOY = "deploy"
+    CONFIG = "config"
+    SCALE = "scale"
+    FEATURE_FLAG = "feature_flag"
+    INFRA = "infra"
+    ROLLBACK = "rollback"
+
+
+class ChangeEvent(BaseModel):
+    """Something a human or pipeline did to the system.
+
+    Most production incidents are caused by a change. Without this feed the
+    agent can only reason from physics — it sees lag rise and infers capacity,
+    never "lag rose ninety seconds after deploy a3f2c1". Correlating the two
+    is the single largest accuracy gain available to the diagnosis step.
+    """
+
+    change_id: str = Field(default_factory=lambda: _id("chg"))
+    ts: datetime = Field(default_factory=_now)
+    kind: ChangeKind
+    service: str
+    summary: str
+    # Free-form provenance: commit sha, pipeline url, ticket, author.
+    reference: str = ""
+    author: str = ""
+    version: str = ""
+    source: str = "api"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class Anomaly(BaseModel):
     """The detector's output. No LLM has seen this yet."""
 
@@ -108,6 +139,20 @@ class ActionType(str, Enum):
     NO_OP = "no_op"
 
 
+class AutonomyMode(str, Enum):
+    """How much the agent is permitted to do without a human.
+
+    `SHADOW` is the one that matters commercially: everything runs — detection,
+    diagnosis, planning, policy evaluation — and the actuator is gated, so the
+    system accumulates a record of what it *would* have done. That record is
+    what earns the permission to leave shadow mode.
+    """
+
+    SHADOW = "shadow"          # decide everything, execute nothing
+    SUPERVISED = "supervised"  # execute only what policy auto-approves
+    AUTONOMOUS = "autonomous"  # as supervised, but a wider auto-approve ceiling
+
+
 class Action(BaseModel):
     action_id: str = Field(default_factory=lambda: _id("act"))
     type: ActionType
@@ -117,6 +162,10 @@ class Action(BaseModel):
     reversible: bool = True
     # Filled by the policy engine, not the planner.
     blast_radius: int | None = None
+    # How to undo this, computed from live state *before* execution. Captured
+    # at plan time because the state needed to build it — the replica count to
+    # return to, the pool size that was there — no longer exists afterwards.
+    inverse: "Action | None" = None
 
 
 class PolicyDecision(BaseModel):
@@ -139,6 +188,8 @@ class Diagnosis(BaseModel):
     reasoning: str
     evidence: list[str] = Field(default_factory=list)
     similar_incidents: list[str] = Field(default_factory=list)
+    # Changes shortly before onset — the "what changed?" a human asks first.
+    correlated_changes: list[str] = Field(default_factory=list)
     # "llm" when Claude produced it, "offline" for the deterministic planner.
     source: Literal["llm", "offline"] = "offline"
     model: str | None = None
@@ -200,6 +251,11 @@ class ActionResult(BaseModel):
     detail: str = ""
     actuator: str = "simulated"
     duration_ms: int = 0
+    # Set when the actuator was gated rather than the action refused — the
+    # counterfactual record that makes shadow mode useful.
+    shadowed: bool = False
+    rolled_back: bool = False
+    rollback_detail: str = ""
 
 
 class ApprovalRequest(BaseModel):
@@ -218,6 +274,25 @@ class ApprovalResponse(BaseModel):
     approved_by: str = "operator"
     note: str = ""
     ts: datetime = Field(default_factory=_now)
+
+
+class ShadowRecord(BaseModel):
+    """What the agent would have done, had it been allowed."""
+
+    record_id: str = Field(default_factory=lambda: _id("shd"))
+    ts: datetime = Field(default_factory=_now)
+    incident_id: str
+    service: str
+    root_cause: str
+    confidence: float
+    action_type: str
+    action_params: dict[str, Any] = Field(default_factory=dict)
+    blast_radius: int
+    policy_effect: str
+    # True when policy would have let it run unattended — the number that
+    # answers "how much of this could we have automated?"
+    would_have_auto_executed: bool
+    reasoning: str = ""
 
 
 class Outcome(BaseModel):
@@ -240,3 +315,8 @@ class Outcome(BaseModel):
     cost_usd: float = 0.0
     human_approved: bool = False
     scenario: str | None = None
+    autonomy_mode: str = "supervised"
+    rolled_back: bool = False
+
+
+Action.model_rebuild()
