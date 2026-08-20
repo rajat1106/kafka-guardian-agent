@@ -1,7 +1,9 @@
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { Activity, Bot, Network, Plug, ShieldQuestion } from "lucide-react";
+import { Activity, Bot, LogOut, Network, Plug, ShieldQuestion } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import type { Principal } from "@/lib/auth";
 
 const TABS = [
   { to: "/", label: "Overview", icon: Activity,
@@ -18,9 +20,13 @@ interface Props {
   connected: boolean;
   pendingApprovals: number;
   clusterLabel?: string;
+  principal?: Principal | null;
+  onSignOut?: () => void;
 }
 
-export const AppNav = ({ connected, pendingApprovals, clusterLabel }: Props) => {
+export const AppNav = ({
+  connected, pendingApprovals, clusterLabel, principal, onSignOut,
+}: Props) => {
   const { pathname } = useLocation();
   return (
     <header className="sticky top-0 z-30 border-b border-border/60 bg-background/85 backdrop-blur">
@@ -72,6 +78,22 @@ export const AppNav = ({ connected, pendingApprovals, clusterLabel }: Props) => 
               {connected ? "live" : "reconnecting"}
             </span>
           </span>
+
+          {principal && (
+            <div className="flex items-center gap-2 border-l border-border/60 pl-3">
+              <div className="text-right leading-tight">
+                <div className="text-xs font-medium">{principal.display_name}</div>
+                <div className="text-[10px] text-muted-foreground">
+                  {principal.roles.join(", ")} · approves to blast{" "}
+                  {principal.max_blast}
+                </div>
+              </div>
+              <Button size="sm" variant="ghost" className="h-7 px-2"
+                      onClick={onSignOut} title="Sign out">
+                <LogOut className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </header>

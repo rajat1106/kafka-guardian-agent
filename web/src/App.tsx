@@ -4,10 +4,14 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 
+import { useEffect, useState } from "react";
 import { AppNav } from "@/components/AppNav";
 import { useGuardian } from "@/hooks/useGuardian";
+import { api } from "@/lib/api";
+import { auth } from "@/lib/auth";
 import Connections from "./pages/Connections";
 import Incident from "./pages/Incident";
+import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
 import Operations from "./pages/Operations";
 import Overview from "./pages/Overview";
@@ -28,6 +32,8 @@ const Shell = () => {
         connected={connected}
         pendingApprovals={state.pending_approvals.length}
         clusterLabel={cluster?.description}
+        principal={auth.principal()}
+        onSignOut={auth.clear}
       />
       <Routes>
         <Route path="/" element={<Overview />} />
@@ -41,13 +47,40 @@ const Shell = () => {
   );
 };
 
+/**
+ * Decides whether to show the app or the login screen.
+ *
+ * Subscribes to the token store so a 401 anywhere in the app — an expired
+ * session, a revoked user — returns here rather than leaving every button
+ * silently inert, which is exactly how the missing login manifested.
+ */
+const AuthGate = () => {
+  const [mode, setMode] = useState<string | null>(null);
+  const [token, setToken] = useState<string | null>(auth.token());
+
+  useEffect(() => auth.subscribe(() => setToken(auth.token())), []);
+  useEffect(() => {
+    api.authConfig()
+      .then((c) => setMode(c.enabled ? c.mode : "disabled"))
+      .catch(() => setMode("disabled"));
+  }, []);
+
+  if (mode === null) {
+    return <div className="min-h-screen bg-background" />;
+  }
+  if (mode !== "disabled" && !token) {
+    return <Login mode={mode} />;
+  }
+  return <Shell />;
+};
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <Shell />
+        <AuthGate />
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

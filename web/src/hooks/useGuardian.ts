@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import {
   api, connect, emptyState,
   type ApprovalRequest, type ClusterInfo, type GuardianState,
@@ -136,22 +137,40 @@ export function useGuardian(): UseGuardian {
     try {
       await api.inject(key);
       setError(null);
+      toast.success(`Injected ${key.replace(/_/g, " ")}`, {
+        description: "The agent should react within about 20 seconds.",
+      });
     } catch (e) {
-      setError(`could not inject ${key}: ${e}`);
+      const msg = (e as Error).message || String(e);
+      setError(msg);
+      toast.error(`Could not inject ${key}`, { description: msg });
     }
   }, []);
 
   const approve = useCallback(
     async (incidentId: string, planId: string, approved: boolean) => {
+      // Every outcome is announced. A decision this consequential must never
+      // be ambiguous about whether it registered — the previous version
+      // swallowed a 401 and left the button looking broken.
       try {
         const res = await api.approve(incidentId, planId, approved);
         if (!res.was_pending) {
-          setError("That approval had already expired or been answered.");
-        } else {
-          setError(null);
+          const msg = "That request had already expired or been answered.";
+          setError(msg);
+          toast.warning(msg);
+          return;
         }
+        setError(null);
+        toast.success(
+          approved ? "Approved — the agent is acting now" : "Rejected",
+          { description: approved
+              ? "Watch the audit trail for the result."
+              : "The incident has been escalated for a person to handle." },
+        );
       } catch (e) {
-        setError(`approval failed: ${e}`);
+        const msg = (e as Error).message || String(e);
+        setError(msg);
+        toast.error("Could not record your decision", { description: msg });
       }
     },
     [],

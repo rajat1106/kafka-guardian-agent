@@ -8,6 +8,8 @@
  * agent directly.
  */
 
+import { auth } from "./auth";
+
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8080";
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8080/ws";
 /** Standard Kafka console (kafbat/kafka-ui) for raw topic and message browsing. */
@@ -362,7 +364,29 @@ async function req(path: string, init: RequestInit = {}, timeoutMs = 20_000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    return await fetch(`${API_URL}${path}`, { ...init, signal: ctrl.signal });
+    const res = await fetch(`${API_URL}${path}`, {
+      ...init,
+      // Every request carries the bearer token. Its absence was why the
+      // approve button did nothing: the API returned 401 and the click was
+      // swallowed.
+      headers: { ...(init.headers ?? {}), ...auth.headers() },
+      signal: ctrl.signal,
+    });
+    if (res.status === 401) {
+      // The token is missing, expired or rejected. Clearing it sends the
+      // shell back to the login screen rather than leaving every button
+      // mysteriously inert.
+      auth.clear();
+      throw new Error("Your session has expired. Please sign in again.");
+    }
+    if (res.status === 403) {
+      const body = await res.clone().json().catch(() => ({}));
+      throw new Error(
+        (body as { detail?: string }).detail ??
+          "You do not have permission to do that.",
+      );
+    }
+    return res;
   } catch (e) {
     if ((e as Error).name === "AbortError") {
       throw new Error(`Timed out after ${timeoutMs / 1000}s — is the API running?`);
@@ -400,6 +424,29 @@ export const api = {
     const res = await req(`/api/scenarios/${key}/inject`, { method: "POST" });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
+  },
+
+  // ── auth ─────────────────────────────────────────────────────────
+  authConfig: () =>
+    get<{ mode: string; enabled: boolean; oidc_issuer: string | null }>(
+      "/api/auth/config",
+    ),
+
+  login: async (username: string, password: string) => {
+    const res = await req("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as { detail?: string }).detail ?? "Sign-in failed");
+    }
+    return res.json() as Promise<{
+      token: string;
+      expires_at: string;
+      principal: import("./auth").Principal;
+    }>;
   },
 
   toggleChaos: async () => {
@@ -472,7 +519,10 @@ export const api = {
         approved_by: "operator",
       }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as { detail?: string }).detail ?? await res.text());
+    }
     return res.json() as Promise<{ published: boolean; was_pending: boolean }>;
   },
 };

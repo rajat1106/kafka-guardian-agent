@@ -228,7 +228,9 @@ few weeks, `/api/shadow/report` answers the question that actually decides
 whether to hand it the keys: *how much of this needed nobody?* Nothing about
 an autonomous remediation system deserves trust before that number exists.
 
-**Authentication.** `AUTH_MODE=local` (username/password, JWTs issued here) or
+**Authentication.** With `AUTH_MODE=local` or `oidc` the dashboard shows a
+sign-in screen and every request carries the token; the nav shows who you are
+and the blast radius your role may approve. `AUTH_MODE=local` (username/password, JWTs issued here) or
 `oidc` (validated against your IdP's JWKS). Authorisation is a blast-radius
 ceiling per role on the same 0–5 scale the policy uses: an operator approves
 up to 3, only an approver or admin signs off a region failover. Identity comes
